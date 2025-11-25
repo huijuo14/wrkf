@@ -43,7 +43,7 @@ def get_active_campaigns(session):
                     if campaign_id_match:
                         campaigns.append({
                             'id': campaign_id_match.group(1),
-                            'bid_url': f"https://adsha.re{bid_link['href']}",
+                            'bid_url': bid_link['href'],
                             'completion': completion
                         })
                         print(f"Found ACTIVE campaign {campaign_id_match.group(1)} at {completion:.1f}%")
@@ -65,9 +65,11 @@ def get_bid_info(session, bid_url):
         current_bid = int(bid_input.get('value', 0))
 
         top_bid = 0
-        label_div = soup.find('div', class_='label', string=lambda t: t and 'Bid' in t)
-        if label_div and label_div.find('span'):
-            match = re.search(r'top bid is (\d+)', label_div.find('span').text, re.IGNORECASE)
+        # Find the div with class 'label' that contains the text 'Bid'
+        label_div = soup.find('div', class_='label', string=re.compile(r'Bid'))
+        if label_div:
+            # Search for the top bid text within the entire content of the div
+            match = re.search(r'top bid is (\d+)', label_div.text, re.IGNORECASE)
             if match:
                 top_bid = int(match.group(1))
         
@@ -107,20 +109,23 @@ def run_bid_monitor_once():
         return
 
     for campaign in active_campaigns:
-        print(f"\nChecking campaign {campaign['id']} ({campaign['completion']:.1f}% complete)....")
+        print(f"\nChecking campaign {campaign['id']} ({campaign['completion']:.1f}% complete)...")
+        
+        # We need both current and top bid for the calculation
         current_bid, top_bid = get_bid_info(session, campaign['bid_url'])
         
-        if current_bid is None:
+        if current_bid is None or top_bid is None:
             print("  Could not retrieve bid info. Skipping.")
             continue
         
-        desired_bid = top_bid + 2
+        desired_bid = top_bid + 2  # Bid 2 credits higher than the top bid
         
         if current_bid < desired_bid:
             print(f"  Action: Your bid ({current_bid}) is less than desired ({desired_bid}). Adjusting...")
-            adjust_bid(session, campaign['bid_url'], desired_bid)
+            if adjust_bid(session, campaign['bid_url'], desired_bid):
+                time.sleep(3)  # Wait 3 seconds for the site to process the change
         else:
-            print(f"  OK: Your bid ({current_bid}) is sufficient.")
+            print(f"  OK: Your bid ({current_bid}) is sufficient (at or above {desired_bid}).")
 
     print("\n--- Bid Monitor Cycle Finished ---")
 
