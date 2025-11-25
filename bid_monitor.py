@@ -109,20 +109,20 @@ def find_bid_url_for_campaign_id(session, campaign_id):
     return None
 
 def get_active_campaigns(session):
-    """Finds active campaigns under 95% completion."""
+    """Finds campaigns with bidding functionality (completion check is secondary)."""
     try:
         response = session.get(ADVERTS_URL, timeout=15)
         response.raise_for_status()
         soup = BeautifulSoup(response.text, 'html.parser')
 
-        # Get all campaigns first (including those with bidding functionality)
+        # Get all campaigns with bidding functionality
         all_campaigns = get_all_campaigns(session)
 
-        # Filter for active campaigns under 95% completion
+        # Try to get completion status for each campaign
         active_campaigns = []
 
         for campaign in all_campaigns:
-            # Get the campaign details page to check completion
+            # Get the campaign details page to check completion and bid info
             bid_response = session.get(campaign['bid_url'])
             if bid_response.status_code == 200:
                 bid_soup = BeautifulSoup(bid_response.text, 'html.parser')
@@ -143,34 +143,14 @@ def get_active_campaigns(session):
                     else:
                         print(f"Skipped campaign {campaign['id']} at {completion:.1f}% completion (≥95%)")
                 else:
-                    # If no visitor info, include it as potentially active
+                    # If no visitor info but bid page is accessible, include it (likely active)
                     campaign['completion'] = 0
                     active_campaigns.append(campaign)
-                    print(f"Found campaign {campaign['id']} with no completion info")
+                    print(f"Found campaign {campaign['id']} with bid functionality (no completion info)")
             else:
-                # If can't access bid page, check if it's in the main page with visitor info
-                print(f"Checking campaign {campaign['id']} in main page...")
-
-                # Check main page for visitor info
-                text_context = soup.get_text()
-                visitor_pattern = rf'{campaign["id"]}.*?(\d+)\s*/\s*(\d+)\s*(?:visitors|visitor)'
-                visitor_match = re.search(visitor_pattern, text_context, re.IGNORECASE | re.DOTALL)
-
-                if visitor_match:
-                    current_visitors, max_visitors = map(int, visitor_match.groups())
-                    completion = (current_visitors / max_visitors) * 100 if max_visitors > 0 else 0
-
-                    if completion < 95:
-                        campaign['completion'] = completion
-                        active_campaigns.append(campaign)
-                        print(f"Found active campaign {campaign['id']} at {completion:.1f}% completion")
-                    else:
-                        print(f"Skipped campaign {campaign['id']} at {completion:.1f}% completion (≥95%)")
-                else:
-                    # If no visitor info, include it (assuming under 95%)
-                    campaign['completion'] = 0
-                    active_campaigns.append(campaign)
-                    print(f"Found campaign {campaign['id']} with no completion info")
+                # If can't access bid page, it might be a different type of campaign
+                print(f"Could not access bid page for campaign {campaign['id']}, skipping")
+                continue
 
         return active_campaigns
     except requests.exceptions.RequestException as e:
@@ -191,18 +171,36 @@ def get_bid_info(session, bid_url):
         current_bid = int(bid_input.get('value', 0)) if bid_input else 0
 
         top_bid = 0
-        # Use the more robust method from workingbid_monitor.py
         page_text = soup.get_text()
-        top_bid_match = re.search(r'top bid is (\d+) credits', page_text, re.IGNORECASE)
+
+        # Multiple methods to find the top bid
+        # Method 1: Look for "top bid is X credits" pattern
+        top_bid_match = re.search(r'top\s+bid\s+is\s+(\d+)\s+credits?', page_text, re.IGNORECASE)
         if top_bid_match:
             top_bid = int(top_bid_match.group(1))
         else:
-            # Fallback to original method
-            label_div = soup.find('div', class_='label', string=re.compile(r'Bid'))
-            if label_div:
-                match = re.search(r'top bid is (\d+)', label_div.text, re.IGNORECASE)
-                if match:
-                    top_bid = int(match.group(1))
+            # Method 2: Look for the label div containing "Bid" and top bid info
+            label_divs = soup.find_all('div', class_='label')
+            for label_div in label_divs:
+                label_text = label_div.get_text()
+                top_bid_match = re.search(r'top\s+bid\s+is\s+(\d+)', label_text, re.IGNORECASE)
+                if top_bid_match:
+                    top_bid = int(top_bid_match.group(1))
+                    break
+
+        # Method 3: Look for other possible patterns in the entire response
+        if top_bid == 0:
+            # Try to find patterns like "(X credits)" or similar near bid-related text
+            bid_related_text = re.findall(r'bid.*?(\d+)\s*credits?|(\d+)\s*credits?.*?bid', page_text, re.IGNORECASE)
+            for match in bid_related_text:
+                # Each match is a tuple, get the non-empty value
+                found_bid = match[0] or match[1]
+                if found_bid and found_bid.isdigit():
+                    found_bid_int = int(found_bid)
+                    # Only update top_bid if it's reasonable (not the current bid)
+                    if found_bid_int != current_bid and found_bid_int > top_bid:
+                        top_bid = found_bid_int
+                        break
 
         print(f"  Parsed bid info: Your Bid={current_bid}, Top Bid={top_bid}")
         return current_bid, top_bid
