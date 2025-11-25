@@ -41,7 +41,7 @@ jobs:
         echo "Smart bid monitor completed. Only active campaigns under 95% completion are monitored."
 
     - name: Save cookies for next run
-      uses: actions/upload-artifact@v3
+      uses: actions/upload-artifact@v4
       if: success()
       with:
         name: session-cookies
