@@ -1,13 +1,13 @@
-name: Smart AdShare Bid Monitor
+name: Daily AdShare Visitor Assigner
 
 on:
   schedule:
-    # Runs every 15 minutes. The script itself will exit if no action is needed.
-    - cron: '*/15 * * * *'
+    # Runs daily around 12:15 UTC (5:45 PM IST). The script adds its own random delay.
+    - cron: '15 12 * * *'
   workflow_dispatch: # Allows manual triggering
 
 jobs:
-  run-bid-monitor:
+  run-daily-assigner:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -20,17 +20,17 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install requests beautifulsoup4
+          pip install requests beautifulsoup4 pytz
       - name: Download session cookies
         uses: actions/download-artifact@v4
         with:
           name: adshare-session
         continue-on-error: true
-      - name: Run Bid Monitor
+      - name: Run Daily Assigner
         env:
           USERNAME: ${{ secrets.ADSHARE_USERNAME }}
           PASSWORD: ${{ secrets.ADSHARE_PASSWORD }}
-        run: python bid_monitor.py
+        run: python daily_assigner.py
       - name: Upload session cookies
         uses: actions/upload-artifact@v4
         with:
