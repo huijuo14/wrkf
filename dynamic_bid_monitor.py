@@ -2,6 +2,7 @@
 """
 Dynamic Bid Monitor for AdShare
 Automatically monitors and adjusts bids to stay competitive
+Only monitors campaigns under 95% completion (intelligent monitoring)
 """
 
 import requests
@@ -9,7 +10,9 @@ from bs4 import BeautifulSoup
 import time
 import pickle
 import os
+import random
 from datetime import datetime
+import pytz
 
 def load_cookies():
     """Load cookies from file if it exists"""
@@ -103,46 +106,98 @@ def get_all_campaigns_with_bidding(session):
         if response.status_code != 200:
             print("Failed to get adverts page")
             return []
-
+        
         soup = BeautifulSoup(response.text, 'html.parser')
-
-        # Find all campaign-related links to extract campaign IDs
-        all_links = soup.find_all('a', href=True)
-        campaign_ids = set()
-
-        # Use regex to find campaign IDs from various campaign action URLs
+        
         import re
-
-        # Find campaigns and their completion percentages
+        
+        # Find all campaign IDs by looking for any advert action links
+        all_links = soup.find_all('a', href=True)
+        possible_campaign_ids = set()
+        for link in all_links:
+            href = link.get('href', '')
+            campaign_match = re.search(r'/adverts/(?:pause|delete|assign|bid)/(\d+)/', href)
+            if campaign_match:
+                possible_campaign_ids.add(campaign_match.group(1))
+        
+        # Find campaign completion data by looking for visitor counts and active status
+        # Look for patterns like "X / Y visitors" in blocks that contain "ACTIVE"
+        page_text = soup.get_text()
+        
+        # Find all visitor count patterns in the page
+        visitor_patterns = re.findall(r'(\d+)\s*/\s*(\d+)\s+visitors', page_text)
+        
+        # More reliable approach: Find elements that contain "active" and visitor counts
+        # Search for the specific pattern: "ACTIVE XX / YY visitors" 
+        active_with_visitors_pattern = r'ACTIVE.*?(\d+)\s*/\s*(\d+)\s*visitors'
+        active_matches = re.findall(active_with_visitors_pattern, page_text, re.IGNORECASE)
+        
         campaigns_with_completion = []
-
-        # Look for campaign blocks that contain visitor counts
-        all_campaign_elements = soup.find_all(['div', 'tr', 'td'], string=lambda text: text and ('active' in text.lower() or 'complete' in text.lower()) and ('/' in text))
-
-        for element in all_campaign_elements:
-            parent = element.find_parent()
-            if parent:
-                parent_text = parent.get_text()
-
-                # Look for visitor count pattern: "X / Y visitors"
-                visitor_pattern = r'(\d+)\s*/\s*(\d+)\s+visitors'
-                visitor_match = re.search(visitor_pattern, parent_text)
-
-                if visitor_match and 'active' in parent_text.lower():
-                    current_visitors = int(visitor_match.group(1))
-                    max_visitors = int(visitor_match.group(2))
-                    completion_percentage = (current_visitors / max_visitors) * 100 if max_visitors > 0 else 0
-
-                    # Only include campaigns that are under 95% completed
-                    if completion_percentage < 95:
-                        # Find the campaign ID from the same block
-                        pause_links = parent.find_all('a', href=lambda href: href and '/adverts/pause/' in href if href else False)
-                        if pause_links:
-                            pause_url = pause_links[0].get('href')
-                            campaign_match = re.search(r'/adverts/pause/(\d+)/', pause_url)
-                            if campaign_match:
-                                campaign_id = campaign_match.group(1)
-
+        
+        for match in active_matches:
+            current_visitors = int(match[0])
+            max_visitors = int(match[1])
+            completion_percentage = (current_visitors / max_visitors) * 100 if max_visitors > 0 else 0
+            
+            if completion_percentage < 95:
+                # Now find which campaign ID this relates to
+                # Look for campaign ID in the same general area of the page
+                # For this, we'll need to find the specific block containing this data
+                
+                # Search for the entire block that contains this information
+                # We'll search for the pattern that includes "active" and the visitor count
+                pattern_to_find = f"ACTIVE.*?{current_visitors}\\s*/\\s*{max_visitors}\\s*visitors"
+                match_position = re.search(pattern_to_find, page_text, re.IGNORECASE)
+                
+                if match_position:
+                    # Look for campaign ID in the nearby text (within 200 characters before)
+                    start_pos = max(0, match_position.start() - 200)
+                    context = page_text[start_pos:match_position.end() + 200]
+                    
+                    # Find campaign IDs in this context
+                    local_campaign_match = re.search(r'/adverts/(?:pause|delete|assign|bid)/(\d+)/', context)
+                    if local_campaign_match:
+                        campaign_id = local_campaign_match.group(1)
+                        
+                        campaign_info = {
+                            'campaign_id': campaign_id,
+                            'completion_percentage': completion_percentage,
+                            'current_visitors': current_visitors,
+                            'max_visitors': max_visitors
+                        }
+                        campaigns_with_completion.append(campaign_info)
+                        print(f"Found ACTIVE campaign {campaign_id} - {completion_percentage:.1f}% completed ({current_visitors}/{max_visitors})")
+        
+        # If the above method doesn't work, try parsing by HTML structure
+        if not campaigns_with_completion:
+            # Look for all elements that might contain campaign information
+            potential_blocks = soup.find_all(['div', 'tr', 'td', 'section'])
+            
+            for block in potential_blocks:
+                block_text = block.get_text()
+                
+                # Check if this block contains both "active" and visitor pattern
+                if 'active' in block_text.lower() and '/' in block_text and 'visitors' in block_text.lower():
+                    # Extract visitor count from this block
+                    visitor_match = re.search(r'(\d+)\s*/\s*(\d+)\s*visitors', block_text)
+                    if visitor_match:
+                        current_visitors = int(visitor_match.group(1))
+                        max_visitors = int(visitor_match.group(2))
+                        completion_percentage = (current_visitors / max_visitors) * 100 if max_visitors > 0 else 0
+                        
+                        if completion_percentage < 95:
+                            # Find campaign ID in the same block
+                            block_links = block.find_all('a', href=True)
+                            campaign_id = None
+                            
+                            for link in block_links:
+                                href = link.get('href', '')
+                                id_match = re.search(r'/adverts/(?:pause|delete|assign|bid)/(\d+)/', href)
+                                if id_match:
+                                    campaign_id = id_match.group(1)
+                                    break
+                            
+                            if campaign_id:
                                 campaign_info = {
                                     'campaign_id': campaign_id,
                                     'completion_percentage': completion_percentage,
@@ -151,12 +206,12 @@ def get_all_campaigns_with_bidding(session):
                                 }
                                 campaigns_with_completion.append(campaign_info)
                                 print(f"Found ACTIVE campaign {campaign_id} - {completion_percentage:.1f}% completed ({current_visitors}/{max_visitors})")
-
-        # Process only campaigns that are not 95%+ completed
+        
+        # Process campaigns that are not 95%+ completed
         campaigns = []
         for campaign in campaigns_with_completion:
             campaign_id = campaign['campaign_id']
-
+            
             # Find bid URL for this campaign
             bid_links = [link for link in all_links if f'/adverts/bid/{campaign_id}/' in link.get('href', '')]
             if bid_links:
@@ -164,7 +219,7 @@ def get_all_campaigns_with_bidding(session):
             else:
                 # Construct bid URL if not found directly
                 bid_url = f"https://adsha.re/adverts/bid/{campaign_id}"
-
+            
             campaign_info = {
                 'campaign_id': campaign_id,
                 'bid_url': bid_url,
@@ -176,7 +231,7 @@ def get_all_campaigns_with_bidding(session):
         if not campaigns:
             print("No campaigns under 95% completion found - bids are only checked for campaigns under 95% completion")
             print("Bid monitor will pause until campaigns are under 95% completion")
-
+        
         return campaigns
     except Exception as e:
         print(f"Error getting campaigns: {e}")
@@ -205,6 +260,7 @@ def get_current_bid_info(session, campaign_url):
     try:
         response = session.get(campaign_url)
         if response.status_code != 200:
+            print(f"Failed to get bid info for campaign, status: {response.status_code}")
             return None, None
         
         soup = BeautifulSoup(response.text, 'html.parser')
@@ -250,10 +306,10 @@ def adjust_bid(session, bid_url, new_bid):
 def run_bid_monitor_once():
     """Run bid monitor once - optimized for GitHub Actions"""
     print(f"Starting bid monitor at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-
+    
     # Create session
     session = requests.Session()
-
+    
     # Try to load existing cookies
     loaded_cookies = load_cookies()
     if loaded_cookies:
@@ -262,35 +318,35 @@ def run_bid_monitor_once():
     else:
         print("No existing cookies found")
         return
-
+    
     print(f"\n--- Checking bids ---")
-
+    
     # Dynamically get all campaigns
     campaigns = get_all_campaigns_with_bidding(session)
-
+    
     # Check if we should monitor based on completion percentage
     should_check, reason = should_check_bids_due_to_completion(campaigns)
     print(f"Monitoring decision: {reason}")
-
+    
     if not should_check:
         print("Skipping bid checks due to high completion percentage on all campaigns")
         return
-
+    
     if not campaigns:
         print("No ACTIVE campaigns found - no bids to adjust")
         return
-
+    
     # Process active campaigns under 95% completion
     for campaign in campaigns:
         print(f"Checking active campaign {campaign['campaign_id']} ({campaign['completion_percentage']:.1f}% completed)")
-
+        
         current_bid, top_bid = get_current_bid_info(session, campaign['bid_url'])
         if current_bid is not None and top_bid is not None:
             print(f"  Current bid: {current_bid}, Top bid: {top_bid}")
-
+            
             # Calculate desired bid (top bid + buffer)
             desired_bid = top_bid + campaign['bid_buffer']
-
+            
             if current_bid < desired_bid:
                 print(f"  Current bid is below desired ({desired_bid}), adjusting...")
                 if adjust_bid(session, campaign['bid_url'], desired_bid):
@@ -317,10 +373,10 @@ def run_bid_monitor_once():
 def monitor_and_adjust_bids():
     """Main function to monitor and adjust bids - continuous version"""
     print(f"Starting bid monitor at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-
+    
     # Create session
     session = requests.Session()
-
+    
     # Try to load existing cookies
     loaded_cookies = load_cookies()
     if loaded_cookies:
@@ -329,40 +385,40 @@ def monitor_and_adjust_bids():
     else:
         print("No existing cookies found")
         return
-
+    
     while True:
         print(f"\n--- Checking bids at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} ---")
-
+        
         # Dynamically get all campaigns each time
         campaigns = get_all_campaigns_with_bidding(session)
-
+        
         # Check if we should monitor based on completion percentage
         should_check, reason = should_check_bids_due_to_completion(campaigns)
         print(f"Monitoring decision: {reason}")
-
+        
         if not should_check:
             print("Pausing bid checks due to high completion percentage on all campaigns...")
             print("Will check again in 60 minutes to see if campaigns need monitoring")
             time.sleep(3600)  # Wait 60 minutes when all campaigns are highly completed
             continue  # Continue to check again
-
+        
         if not campaigns:
             print("No ACTIVE campaigns found - pausing bid monitoring...")
             print("Will check again in 30 minutes to see if campaigns became active")
             time.sleep(1800)  # Wait 30 minutes instead of 10 when no active campaigns
             continue  # Continue to check again
-
+        
         # Process active campaigns under 95% completion
         for campaign in campaigns:
             print(f"Checking active campaign {campaign['campaign_id']} ({campaign['completion_percentage']:.1f}% completed)")
-
+            
             current_bid, top_bid = get_current_bid_info(session, campaign['bid_url'])
             if current_bid is not None and top_bid is not None:
                 print(f"  Current bid: {current_bid}, Top bid: {top_bid}")
-
+                
                 # Calculate desired bid (top bid + buffer)
                 desired_bid = top_bid + campaign['bid_buffer']
-
+                
                 if current_bid < desired_bid:
                     print(f"  Current bid is below desired ({desired_bid}), adjusting...")
                     if adjust_bid(session, campaign['bid_url'], desired_bid):
@@ -385,7 +441,7 @@ def monitor_and_adjust_bids():
                         save_cookies(session.cookies)
                     else:
                         print("Re-login failed")
-
+        
         # Determine sleep time based on campaign completion
         if campaigns:
             # If we have campaigns to monitor, check every 10 minutes
@@ -399,6 +455,6 @@ def monitor_and_adjust_bids():
 if __name__ == "__main__":
     # For GitHub Actions, run bid monitor once
     run_bid_monitor_once()
-
+    
     # For continuous running on a server:
     # monitor_and_adjust_bids()
