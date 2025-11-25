@@ -2,8 +2,8 @@ name: Smart Bid Monitor
 
 on:
   schedule:
-    # Run every 15 minutes to catch when campaigns drop below 95% completion
-    - cron: '*/15 * * * *'  # Every 15 minutes
+    # Run every 10 minutes to catch when campaigns drop below 95% completion
+    - cron: '*/10 * * * *'  # Every 10 minutes
   workflow_dispatch: # Allow manual trigger
 
 jobs:
