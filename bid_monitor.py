@@ -1,23 +1,130 @@
 #!/usr/bin/env python3
 """
-AdShare Refined Bid Monitor
-Monitors active campaigns and intelligently adjusts bids to stay competitive.
-Combines the working bid detection logic with the single-cycle execution pattern.
+AdShare Final Refined Bid Monitor
+Based on the successful workingbid_monitor.py with improvements
 """
 import os
 import re
 import time
-from datetime import datetime
 import requests
 from bs4 import BeautifulSoup
-from adshare_login import get_session
+import pickle
+from datetime import datetime
 
-ADVERTS_URL = "https://adsha.re/adverts"
+# Configuration
+BASE_URL = "https://adsha.re"
+USERNAME = os.environ.get('ADSHARE_USERNAME', "jiocloud90@gmail.com")
+PASSWORD = os.environ.get('ADSHARE_PASSWORD', "@Sd2007123")
+COOKIE_FILE = "session_cookies.pkl"
+
+def load_cookies():
+    """Load cookies from file if it exists"""
+    if os.path.exists(COOKIE_FILE):
+        try:
+            with open(COOKIE_FILE, 'rb') as f:
+                jar = pickle.load(f)
+                return jar
+        except Exception as e:
+            print(f"Error loading cookies: {e}")
+    return None
+
+def save_cookies(jar):
+    """Save cookies to file"""
+    try:
+        with open(COOKIE_FILE, 'wb') as f:
+            pickle.dump(jar, f)
+        print(f"Cookies saved to {COOKIE_FILE}")
+    except Exception as e:
+        print(f"Error saving cookies: {e}")
+
+def get_login_form_details(session):
+    """Get dynamic login form details"""
+    try:
+        response = session.get(f'{BASE_URL}/login')
+        soup = BeautifulSoup(response.text, 'html.parser')
+        login_form = soup.find('form')
+
+        if not login_form:
+            print("Could not find login form")
+            return None, None, None
+
+        # Get the actual form action URL
+        form_action = login_form.get('action')
+        if form_action.startswith('/'):
+            login_url = BASE_URL + form_action
+        elif not form_action.startswith('http'):
+            login_url = BASE_URL + '/' + form_action
+        else:
+            login_url = form_action
+
+        # Find email and password fields
+        email_field = None
+        password_field = None
+
+        all_inputs = login_form.find_all('input')
+        for inp in all_inputs:
+            inp_type = inp.get('type', 'text')
+            inp_value = inp.get('value', '')
+            inp_name = inp.get('name', '')
+
+            # Look for email field
+            if inp_type == 'text' or inp_type == 'email':
+                inp_value_lower = inp_value.lower()
+                if 'email' in inp_value_lower or 'mail' in inp_value_lower or 'address' in inp_value_lower or 'email' in inp_name.lower():
+                    email_field = inp_name
+            # Look for password field (has 'Password' as the value)
+            elif inp_value == 'Password':
+                password_field = inp_name
+            # Special case: password field might have 'password' as type
+            elif inp_type == 'password':
+                password_field = inp_name
+
+        return login_url, email_field, password_field
+    except Exception as e:
+        print(f"Error getting login form details: {e}")
+        return None, None, None
+
+def login(session):
+    """Perform login with dynamic form fields"""
+    login_url, email_field, password_field = get_login_form_details(session)
+
+    if not login_url or not email_field or not password_field:
+        print("Failed to get login form details")
+        return False
+
+    # Prepare login data with correct field names
+    login_data = {
+        email_field: USERNAME,
+        password_field: PASSWORD,
+    }
+
+    print(f"Attempting login with fields: {email_field}, {password_field}")
+    
+    try:
+        response = session.post(login_url, data=login_data, timeout=15)
+        print(f"Login response status: {response.status_code}")
+        
+        # Check if login was successful by looking for account-related elements
+        if 'account' in response.text.lower() or 'logout' in response.text.lower() or response.url != f'{BASE_URL}/login':
+            print("Login successful!")
+            return True
+        else:
+            print("Login may have failed. Checking response...")
+            # Check if still on login page
+            if 'email address' in response.text.lower() and 'password' in response.text.lower():
+                print("Login failed - still on login page")
+                return False
+            else:
+                print("Login response doesn't show login page, assuming success")
+                return True
+    except Exception as e:
+        print(f"Error during login: {e}")
+        return False
 
 def get_all_campaigns(session):
     """Dynamically get all campaigns from the adverts page"""
     try:
-        response = session.get(ADVERTS_URL)
+        response = session.get(f'{BASE_URL}/adverts', timeout=15)
         if response.status_code != 200:
             print("Failed to get adverts page")
             return []
@@ -27,22 +134,28 @@ def get_all_campaigns(session):
         # Find all campaign-related links to extract campaign IDs
         all_links = soup.find_all('a', href=True)
 
-        # Use regex to find campaign IDs from various campaign action URLs
+        # Also look for non-link elements that might contain campaign data
+        all_elements = soup.find_all(['a', 'td', 'tr', 'div'], string=lambda text: text and 'My Advert' in text)
         campaign_ids = set()  # Use set to avoid duplicates
 
-        # Look for various campaign-related URL patterns that contain campaign IDs
-        # Examples: /adverts/pause/{id}/{token}, /adverts/delete/{id}/{token}, /adverts/assign/{id}/{token}
-        # All of these contain a campaign ID after the action type
-        patterns = [
-            r'/adverts/pause/(\d+)/',
-            r'/adverts/delete/(\d+)/',
-            r'/adverts/assign/(\d+)/',
-            r'/adverts/bid/(\d+)/',
-            r'/adverts/speed/(\d+)/'
-        ]
+        # Use regex to find campaign IDs from various campaign action URLs
+        import re
 
+        # Find campaign IDs from action links
         for link in all_links:
             href = link.get('href', '')
+
+            # Look for various campaign-related URL patterns that contain campaign IDs
+            # Examples: /adverts/pause/{id}/{token}, /adverts/delete/{id}/{token}, /adverts/assign/{id}/{token}
+            # All of these contain a campaign ID after the action type
+            patterns = [
+                r'/adverts/pause/(\d+)/',
+                r'/adverts/delete/(\d+)/',
+                r'/adverts/assign/(\d+)/',
+                r'/adverts/bid/(\d+)/',
+                r'/adverts/speed/(\d+)/'
+            ]
+
             for pattern in patterns:
                 match = re.search(pattern, href)
                 if match:
@@ -50,6 +163,20 @@ def get_all_campaigns(session):
                     if campaign_id not in campaign_ids:
                         campaign_ids.add(campaign_id)
                         print(f"Found campaign {campaign_id} from action link")
+
+        # Look for campaigns that might be identified by name but don't have visible bid links
+        # (These may show bid links only when not at the top bid)
+        for element in all_elements:
+            parent = element.find_parent()
+            # Look for any numeric IDs associated with this element
+            if parent:
+                parent_text = str(parent)
+                # Look for patterns that might contain campaign IDs near the "My Advert" text
+                campaign_matches = re.findall(r'/adverts/(?:pause|delete|assign|bid)/(\d+)/', parent_text)
+                for match in campaign_matches:
+                    if match not in campaign_ids:
+                        campaign_ids.add(match)
+                        print(f"Found campaign {match} from 'My Advert' association")
 
         # Also check our known campaign that has bid functionality
         # This ensures we don't miss campaigns that may not appear on the main page
@@ -60,14 +187,15 @@ def get_all_campaigns(session):
                 campaign_ids.add(known_campaign)
                 print(f"Added known campaign with bidding: {known_campaign}")
 
-        # Now attempt to find bid URLs for each campaign ID
+        # Now attempt to find bid URLs for each campaign ID by testing if bid pages exist
         final_campaigns = []
         for campaign_id in campaign_ids:
             bid_url = find_bid_url_for_campaign_id(session, campaign_id)
             if bid_url:
                 campaign_info = {
                     'id': campaign_id,
-                    'bid_url': bid_url
+                    'bid_url': bid_url,
+                    'bid_buffer': 2  # Bid this amount above the top bid
                 }
                 final_campaigns.append(campaign_info)
                 print(f"  -> Bid URL found for campaign {campaign_id}: {bid_url}")
@@ -81,10 +209,10 @@ def get_all_campaigns(session):
 
 def find_bid_url_for_campaign_id(session, campaign_id):
     """Find bid URL for a specific campaign by checking various possible URLs"""
-    # The bid URL format is: /adverts/bid/{campaign_id}/{long_hex_token}
+    import re
 
     # First, try to find bid links on the main page for this specific campaign ID
-    response = session.get(ADVERTS_URL)
+    response = session.get(f'{BASE_URL}/adverts', timeout=15)
     if response.status_code != 200:
         return None
 
@@ -97,169 +225,177 @@ def find_bid_url_for_campaign_id(session, campaign_id):
         # Return the first bid link we found
         return bid_links[0].get('href')
 
-    # If not found on main page, check known bid tokens
+    # If not found on main page, we can try to check if this specific campaign has bid functionality
+    # by attempting to access different variations of bid URLs
+    # Since we don't know the token, we'll need another approach
+    # For now, let's assume if it's a valid campaign it might have bidding
+
+    # We'll return a special marker that will trigger a more detailed search
+    # For the most common case, like campaign 2641 that we know has bidding functionality
     known_bid_tokens = {
         '2641': '9c11d5c78ca339eee3c02533cae3aaabd292f7711a35ed4575a5e9eacb1100396ec99c4f8c0cd807ac1acac44ab85e847cebbae08b90a3575d3aca99128ad1ec'
     }
 
     if campaign_id in known_bid_tokens:
-        return f"{ADVERTS_URL}/bid/{campaign_id}/{known_bid_tokens[campaign_id]}"
+        return f"{BASE_URL}/adverts/bid/{campaign_id}/{known_bid_tokens[campaign_id]}"
 
     # For other campaigns, if we can't find the specific token, return None
     return None
 
-def get_active_campaigns(session):
-    """Finds campaigns with bidding functionality (completion check is secondary)."""
+def get_current_bid_info(session, campaign):
+    """Get current bid and top bid information for a campaign"""
     try:
-        response = session.get(ADVERTS_URL, timeout=15)
-        response.raise_for_status()
+        response = session.get(campaign['bid_url'], timeout=15)
+        if response.status_code != 200:
+            print(f"Failed to get bid info for campaign {campaign['id']}, status code: {response.status_code}")
+            return None, None
+
         soup = BeautifulSoup(response.text, 'html.parser')
 
-        # Get all campaigns with bidding functionality
-        all_campaigns = get_all_campaigns(session)
-
-        # Try to get completion status for each campaign
-        active_campaigns = []
-
-        for campaign in all_campaigns:
-            # Get the campaign details page to check completion and bid info
-            bid_response = session.get(campaign['bid_url'])
-            if bid_response.status_code == 200:
-                bid_soup = BeautifulSoup(bid_response.text, 'html.parser')
-
-                # Look for visitor information on the bid page
-                page_text = bid_soup.get_text()
-                visitor_match = re.search(r'(\d+)\s*/\s*(\d+)\s*(?:visitors|visitor)', page_text, re.IGNORECASE)
-
-                if visitor_match:
-                    current_visitors, max_visitors = map(int, visitor_match.groups())
-                    completion = (current_visitors / max_visitors) * 100 if max_visitors > 0 else 0
-
-                    # Only include campaigns under 95% completion
-                    if completion < 95:
-                        campaign['completion'] = completion
-                        active_campaigns.append(campaign)
-                        print(f"Found active campaign {campaign['id']} at {completion:.1f}% completion")
-                    else:
-                        print(f"Skipped campaign {campaign['id']} at {completion:.1f}% completion (≥95%)")
-                else:
-                    # If no visitor info but bid page is accessible, include it (likely active)
-                    campaign['completion'] = 0
-                    active_campaigns.append(campaign)
-                    print(f"Found campaign {campaign['id']} with bid functionality (no completion info)")
-            else:
-                # If can't access bid page, it might be a different type of campaign
-                print(f"Could not access bid page for campaign {campaign['id']}, skipping")
-                continue
-
-        return active_campaigns
-    except requests.exceptions.RequestException as e:
-        print(f"Network error getting campaigns: {e}")
-    except Exception as e:
-        print(f"An error occurred while getting campaigns: {e}")
-    return []
-
-def get_bid_info(session, bid_url):
-    """Extracts the current and top bid from a campaign's bid page."""
-    try:
-        headers = {'Referer': ADVERTS_URL}
-        response = session.get(bid_url, headers=headers, timeout=15)
-        response.raise_for_status()
-        soup = BeautifulSoup(response.text, 'html.parser')
-
+        # Find the bid input field (current bid)
         bid_input = soup.find('input', {'name': 'bid', 'id': 'bid'})
-        current_bid = int(bid_input.get('value', 0)) if bid_input else 0
+        current_bid = int(bid_input.get('value')) if bid_input else 0
 
-        top_bid = 0
+        # Look for top bid information in the page text
         page_text = soup.get_text()
+        top_bid = current_bid  # Default to current bid if not found
 
-        # Multiple methods to find the top bid
-        # Method 1: Look for "top bid is X credits" pattern
-        top_bid_match = re.search(r'top\s+bid\s+is\s+(\d+)\s+credits?', page_text, re.IGNORECASE)
-        if top_bid_match:
-            top_bid = int(top_bid_match.group(1))
-        else:
-            # Method 2: Look for the label div containing "Bid" and top bid info
-            label_divs = soup.find_all('div', class_='label')
-            for label_div in label_divs:
-                label_text = label_div.get_text()
-                top_bid_match = re.search(r'top\s+bid\s+is\s+(\d+)', label_text, re.IGNORECASE)
-                if top_bid_match:
-                    top_bid = int(top_bid_match.group(1))
+        # Try multiple patterns to find the top bid in the page
+        top_bid_patterns = [
+            r'top\s+bid\s+is\s+(\d+)\s+credits?',
+            r'bid.*?you.*?(\d+).*?top.*?(\d+)',  # For patterns like "bid: you 5, top 7"
+            r'top.*?bid.*?(\d+)',
+            r'(\d+).*?top.*?bid',
+            r'current.*?top.*?(\d+)'
+        ]
+        
+        for pattern in top_bid_patterns:
+            top_bid_match = re.search(pattern, page_text, re.IGNORECASE)
+            if top_bid_match:
+                # The pattern might return multiple groups (e.g., for "bid: you 5, top 7")
+                groups = top_bid_match.groups()
+                if len(groups) > 1 and 'you' in pattern.lower():
+                    # Special handling for patterns that capture both current and top bid
+                    # In "bid.*?you.*?(\d+).*?top.*?(\d+)", group(1) is user bid, group(2) is top bid
+                    try:
+                        top_bid = int(groups[1])  # Second group should be the top bid
+                    except (ValueError, IndexError):
+                        # Fallback to processing individually
+                        for group in groups:
+                            if group and group.isdigit():
+                                potential_top = int(group)
+                                if potential_top != current_bid:  # Don't set top_bid to same as current
+                                    top_bid = potential_top
+                                    break
+                else:
+                    # Process single groups as before
+                    for group in groups:
+                        if group and group.isdigit():
+                            potential_top = int(group)
+                            if potential_top != current_bid:  # Don't set top_bid to same as current
+                                top_bid = potential_top
+                                break
+                if top_bid != current_bid:  # Only break if we found a different value
                     break
 
-        # Method 3: Look for other possible patterns in the entire response
-        if top_bid == 0:
-            # Try to find patterns like "(X credits)" or similar near bid-related text
-            bid_related_text = re.findall(r'bid.*?(\d+)\s*credits?|(\d+)\s*credits?.*?bid', page_text, re.IGNORECASE)
-            for match in bid_related_text:
-                # Each match is a tuple, get the non-empty value
-                found_bid = match[0] or match[1]
-                if found_bid and found_bid.isdigit():
-                    found_bid_int = int(found_bid)
-                    # Only update top_bid if it's reasonable (not the current bid)
-                    if found_bid_int != current_bid and found_bid_int > top_bid:
-                        top_bid = found_bid_int
-                        break
-
-        print(f"  Parsed bid info: Your Bid={current_bid}, Top Bid={top_bid}")
+        print(f"  Parsed bid info: Current Bid={current_bid}, Top Bid={top_bid}")
         return current_bid, top_bid
     except Exception as e:
-        print(f"  Error getting bid info: {e}")
-    return None, None
+        print(f"Error getting bid info for campaign {campaign['id']}: {e}")
+        return None, None
 
-def adjust_bid(session, bid_url, new_bid):
-    """Submits a new bid for a campaign."""
+def adjust_bid(session, campaign, new_bid):
+    """Adjust bid to a new value"""
     try:
-        response = session.post(bid_url, data={'bid': str(new_bid), 'vis': '0'}, timeout=15)
-        response.raise_for_status()
-        print(f"  Successfully submitted new bid of {new_bid}.")
-        return True
-    except requests.exceptions.RequestException as e:
-        print(f"  Failed to adjust bid: {e}")
+        bid_data = {
+            'bid': str(new_bid),
+            'vis': '0'  # Hidden field that's required
+        }
+
+        response = session.post(campaign['bid_url'], data=bid_data, timeout=15)
+        if response.status_code == 200:
+            print(f"Successfully adjusted bid for campaign {campaign['id']} to {new_bid}")
+            return True
+        else:
+            print(f"Failed to adjust bid for campaign {campaign['id']}: Status {response.status_code}")
+            return False
+    except Exception as e:
+        print(f"Error adjusting bid for campaign {campaign['id']}: {e}")
         return False
 
 def run_bid_monitor_once():
     """Main function to run one cycle of the bid monitor."""
-    print(f"--- Starting Refined Bid Monitor Cycle at {datetime.now():%Y-%m-%d %H:%M:%S} ---")
+    print(f"--- Starting Final Refined Bid Monitor Cycle at {datetime.now():%Y-%m-%d %H:%M:%S} ---")
 
-    USERNAME = os.environ.get('ADSHARE_USERNAME', "jiocloud90@gmail.com")
-    PASSWORD = os.environ.get('ADSHARE_PASSWORD', "@Sd2007123")
+    # Create session
+    session = requests.Session()
 
-    session = get_session(USERNAME, PASSWORD)
-    if not session:
-        print("Could not establish a session. Exiting.")
+    # Try to load existing cookies
+    loaded_cookies = load_cookies()
+    if loaded_cookies:
+        session.cookies = loaded_cookies
+        print("Loaded existing cookies")
+        
+        # Verify session is still valid
+        try:
+            verify_response = session.get(f"{BASE_URL}/adverts", timeout=10)
+            if 'login' in verify_response.text.lower() or verify_response.status_code == 403:
+                print("Session appears invalid, performing fresh login")
+                session = requests.Session()  # Create a new session
+                if not login(session):
+                    print("Login failed, exiting")
+                    return
+                save_cookies(session.cookies)
+            else:
+                print("Session is valid")
+        except:
+            print("Could not verify session, performing fresh login")
+            session = requests.Session()  # Create a new session
+            if not login(session):
+                print("Login failed, exiting")
+                return
+            save_cookies(session.cookies)
+    else:
+        print("No existing cookies, performing fresh login")
+        if not login(session):
+            print("Login failed, exiting")
+            return
+        save_cookies(session.cookies)
+
+    print("Waiting 5 seconds for session to stabilize...")
+    time.sleep(5)
+
+    # Get all campaigns
+    campaigns = get_all_campaigns(session)
+
+    if not campaigns:
+        print("No campaigns found, exiting.")
         return
 
-    print("Waiting 15 seconds for session to stabilize...")
-    time.sleep(15)
+    for campaign in campaigns:
+        print(f"\nChecking campaign {campaign['id']}")
 
-    active_campaigns = get_active_campaigns(session)
+        current_bid, top_bid = get_current_bid_info(session, campaign)
+        if current_bid is not None and top_bid is not None:
+            print(f"  Current bid: {current_bid}, Top bid: {top_bid}")
 
-    if not active_campaigns:
-        print("No campaigns with bid functionality found. Nothing to do.")
-        return
+            # Calculate desired bid (top bid + buffer)
+            desired_bid = top_bid + campaign['bid_buffer']
 
-    for campaign in active_campaigns:
-        print(f"\nChecking campaign {campaign['id']} ({campaign['completion']:.1f}% complete)...")
-
-        # We need both current and top bid for the calculation
-        current_bid, top_bid = get_bid_info(session, campaign['bid_url'])
-
-        if current_bid is None or top_bid is None:
-            print("  Could not retrieve bid info. Skipping.")
-            continue
-
-        desired_bid = top_bid + 2  # Bid 2 credits higher than the top bid
-
-        if current_bid < desired_bid:
-            print(f"  Action: Your bid ({current_bid}) is less than desired ({desired_bid}). Adjusting...")
-            if adjust_bid(session, campaign['bid_url'], desired_bid):
-                time.sleep(3)  # Wait 3 seconds for the site to process the change
+            if current_bid < desired_bid:
+                print(f"  Current bid is below desired ({desired_bid}), adjusting...")
+                if adjust_bid(session, campaign, desired_bid):
+                    print(f"  Bid adjusted to {desired_bid}")
+                    # Save cookies after successful update
+                    save_cookies(session.cookies)
+                else:
+                    print("  Failed to adjust bid, continuing...")
+            else:
+                print(f"  Current bid is sufficient (≥ {desired_bid})")
         else:
-            print(f"  OK: Your bid ({current_bid}) is sufficient (at or above {desired_bid}).")
+            print(f"  Failed to get bid info for campaign {campaign['id']}, skipping...")
 
-    print("\n--- Refined Bid Monitor Cycle Finished ---")
+    print("\n--- Final Refined Bid Monitor Cycle Finished ---")
 
 if __name__ == "__main__":
     run_bid_monitor_once()
