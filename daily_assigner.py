@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-AdShare Daily Visitor Assigner - Fixed with Working Login
+AdShare Daily Visitor Assigner - Fixed URL Issues
 """
 import os
 import re
@@ -180,7 +180,14 @@ def get_completed_campaigns(session):
         print(f"DEBUG: Found {len(assign_links)} assignment links")
         
         for link in assign_links:
-            print(f"DEBUG: Checking assignment link: {link['href']}")
+            href = link['href']
+            print(f"DEBUG: Checking assignment link: {href}")
+            
+            # FIX: Check if href is already a full URL
+            if href.startswith('http'):
+                assign_url = href
+            else:
+                assign_url = f"{BASE_URL}{href}"
             
             # Get parent context to check if campaign is COMPLETE
             parent_div = link.find_parent('div')
@@ -191,12 +198,12 @@ def get_completed_campaigns(session):
                 # Check if this campaign is COMPLETE
                 if 'complete' in parent_text.lower():
                     # Extract campaign ID
-                    campaign_id_match = re.search(r'/adverts/assign/(\d+)/', link['href'])
+                    campaign_id_match = re.search(r'/adverts/assign/(\d+)/', href)
                     if campaign_id_match:
                         campaign_id = campaign_id_match.group(1)
                         completed_campaigns.append({
                             'id': campaign_id,
-                            'assign_url': f"{BASE_URL}{link['href']}",
+                            'assign_url': assign_url,  # Use the properly constructed URL
                         })
                         print(f"✓ Found COMPLETE campaign {campaign_id}")
                     else:
@@ -205,30 +212,6 @@ def get_completed_campaigns(session):
                     print("✗ Campaign is not COMPLETE")
             else:
                 print("✗ No parent div found for assignment link")
-        
-        # METHOD 2: If no links found, search for campaign blocks by content
-        if not completed_campaigns:
-            print("DEBUG: Trying alternative search method...")
-            
-            # Look for divs that contain campaign information
-            all_divs = soup.find_all('div')
-            for div in all_divs:
-                div_text = div.get_text()
-                if 'complete' in div_text.lower() and 'visitors' in div_text.lower():
-                    print(f"DEBUG: Found COMPLETE campaign block: {div_text[:100]}...")
-                    
-                    # Find assign link in this div
-                    assign_link = div.find('a', href=lambda href: href and '/adverts/assign/' in href)
-                    if assign_link:
-                        campaign_id_match = re.search(r'/adverts/assign/(\d+)/', assign_link['href'])
-                        if campaign_id_match:
-                            campaign_id = campaign_id_match.group(1)
-                            completed_campaigns.append({
-                                'id': campaign_id,
-                                'assign_url': f"{BASE_URL}{assign_link['href']}",
-                            })
-                            print(f"✓ Found COMPLETE campaign {campaign_id} via content search")
-                            break
         
         return completed_campaigns
         
@@ -251,40 +234,52 @@ def assign_visitors(session, assign_url, num_visitors=50):
             print("  ✗ Could not find assignment form")
             return False
 
-        # Get form action URL
+        # Get form action URL - FIX: Handle relative URLs properly
         action_url = form.get('action')
-        if not action_url.startswith('http'):
-            action_url = f"{BASE_URL}{action_url}"
+        print(f"  Raw form action: {action_url}")
+        
+        if action_url.startswith('http'):
+            # Already a full URL
+            final_action_url = action_url
+        elif action_url.startswith('/'):
+            # Relative URL starting with /
+            final_action_url = f"{BASE_URL}{action_url}"
+        else:
+            # Relative URL without leading /
+            final_action_url = f"{BASE_URL}/{action_url}"
             
-        print(f"  Form action: {action_url}")
+        print(f"  Final form action: {final_action_url}")
 
         # Extract campaign ID from assign_url
         campaign_id_match = re.search(r'/assign/(\d+)/', assign_url)
         campaign_id = campaign_id_match.group(1) if campaign_id_match else "unknown"
         
-        # Prepare form payload
+        # Prepare form payload - FIX: Use the values from the actual form we found
         payload = {
             'vis': str(num_visitors),
-            'bid': '0',
-            'spe': '2',  # Faster - Revisit in 12 hours
+            'bid': '15',  # Set to 15 (top bid + 2) instead of 0
+            'spe': '2',   # Faster - Revisit in 12 hours
             'txt': '0',
             'url': '0', 
             'aid': campaign_id,
         }
 
         print(f"  Submitting assignment of {num_visitors} visitors for campaign {campaign_id}...")
+        print(f"  Payload: {payload}")
         
-        submit_response = session.post(action_url, data=payload, timeout=15)
+        submit_response = session.post(final_action_url, data=payload, timeout=15)
         submit_response.raise_for_status()
         
         # Check if assignment was successful
-        if "visitors" in submit_response.text.lower() or "assign" in submit_response.text.lower():
+        if "visitors" in submit_response.text.lower() or "assign" in submit_response.text.lower() or "update" in submit_response.text.lower():
             print(f"  ✓ Successfully assigned {num_visitors} visitors to campaign {campaign_id}")
             # Save updated cookies
             save_cookies(session.cookies)
             return True
         else:
             print("  ✗ Assignment may have failed - check response")
+            # Debug: print first 500 chars of response
+            print(f"  Response preview: {submit_response.text[:500]}...")
             return False
             
     except Exception as e:
