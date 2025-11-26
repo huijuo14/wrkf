@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-AdShare Daily Visitor Assigner - Fixed Campaign Detection
+AdShare Daily Visitor Assigner - Debug Version
 """
 import os
 import re
@@ -35,6 +35,54 @@ def load_config():
     config['max_campaigns_per_run'] = int(os.environ.get('ADSHARE_MAX_CAMPAIGNS', config['max_campaigns_per_run']))
     return config
 
+def debug_page_content(soup):
+    """Print debug information about the page content"""
+    print("\n" + "="*80)
+    print("DEBUG: PAGE CONTENT ANALYSIS")
+    print("="*80)
+    
+    # Print page title
+    title = soup.find('title')
+    print(f"Page Title: {title.get_text() if title else 'No title found'}")
+    
+    # Print all text content to see what's actually on the page
+    all_text = soup.get_text()
+    lines = [line.strip() for line in all_text.split('\n') if line.strip()]
+    
+    print(f"\nTop 20 text lines on page:")
+    for i, line in enumerate(lines[:20]):
+        print(f"{i+1:2d}: {line}")
+    
+    # Look for any divs that might be campaigns
+    all_divs = soup.find_all('div')
+    print(f"\nTotal div elements found: {len(all_divs)}")
+    
+    # Look for campaign indicators
+    campaign_indicators = []
+    for i, div in enumerate(all_divs):
+        div_text = div.get_text().strip()
+        if any(keyword in div_text.lower() for keyword in ['complete', 'active', 'visitors', 'my advert', 'campaign']):
+            campaign_indicators.append((i, div_text[:100]))
+    
+    print(f"\nDivs with campaign keywords: {len(campaign_indicators)}")
+    for idx, text in campaign_indicators[:10]:  # Show first 10
+        print(f"  Div {idx}: {text}...")
+    
+    # Look for all links
+    all_links = soup.find_all('a', href=True)
+    assign_links = [link for link in all_links if '/adverts/assign/' in link['href']]
+    
+    print(f"\nAll links containing '/adverts/assign/': {len(assign_links)}")
+    for link in assign_links:
+        print(f"  Assign link: {link['href']}")
+        # Check parent elements for campaign info
+        parent = link.find_parent('div')
+        if parent:
+            parent_text = parent.get_text().strip()
+            print(f"    Parent text: {parent_text[:100]}...")
+    
+    print("="*80 + "\n")
+
 def get_completed_campaigns(session, config):
     """Finds campaigns marked with specified status that can have visitors assigned."""
     try:
@@ -43,74 +91,72 @@ def get_completed_campaigns(session, config):
         soup = BeautifulSoup(response.text, 'html.parser')
         completed_campaigns = []
 
-        print("DEBUG: Searching for campaigns...")
+        # First, debug the page content
+        debug_page_content(soup)
         
-        # METHOD 1: Look for divs containing "My Advert" text (more reliable)
-        all_divs = soup.find_all('div')
-        campaign_blocks = []
+        # METHOD 1: Direct search for assign links and check their context
+        print("METHOD 1: Searching for assignment links directly...")
+        assign_links = soup.find_all('a', href=lambda href: href and '/adverts/assign/' in href)
+        print(f"Found {len(assign_links)} assignment links")
         
-        for div in all_divs:
-            div_text = div.get_text()
-            if 'My Advert' in div_text and config['campaign_status'].lower() in div_text.lower():
-                campaign_blocks.append(div)
-                print(f"DEBUG: Found campaign block with 'My Advert' and '{config['campaign_status']}'")
-        
-        print(f"DEBUG: Found {len(campaign_blocks)} campaign blocks using 'My Advert' method")
-        
-        # If METHOD 1 fails, try METHOD 2: Look for any div with border
-        if not campaign_blocks:
-            campaign_blocks = soup.find_all('div', style=lambda s: s and 'border' in str(s))
-            print(f"DEBUG: Found {len(campaign_blocks)} campaign blocks using border method")
-        
-        # If METHOD 2 fails, try METHOD 3: Look for divs with specific classes or structure
-        if not campaign_blocks:
-            # Look for any div that might contain campaign info
-            potential_blocks = soup.find_all('div')
-            for block in potential_blocks:
-                block_text = block.get_text()
-                if config['campaign_status'].lower() in block_text.lower() and 'visitors' in block_text.lower():
-                    campaign_blocks.append(block)
-                    print(f"DEBUG: Found potential campaign block with status and visitors")
+        for link in assign_links:
+            print(f"Checking assignment link: {link['href']}")
             
-            print(f"DEBUG: Found {len(campaign_blocks)} campaign blocks using fallback method")
-
-        for block in campaign_blocks:
-            block_text = block.get_text()
-            print(f"DEBUG: Block text preview: {block_text[:200]}...")
-            
-            # Verify this is actually a campaign block with COMPLETE status
-            if config['campaign_status'].lower() in block_text.lower():
-                print(f"DEBUG: Confirmed {config['campaign_status']} status in block")
+            # Get the parent context to check status
+            parent = link.find_parent('div')
+            if parent:
+                parent_text = parent.get_text()
+                print(f"Parent context: {parent_text[:200]}...")
                 
-                # Find the "Assign More Visitors" link
-                assign_link = block.find('a', href=lambda href: href and '/adverts/assign/' in href)
-                if assign_link:
-                    print(f"DEBUG: Found assign link: {assign_link['href']}")
-                    
+                if config['campaign_status'].lower() in parent_text.lower():
                     # Extract campaign ID
-                    campaign_id_match = re.search(r'/adverts/assign/(\d+)/', assign_link['href'])
+                    campaign_id_match = re.search(r'/adverts/assign/(\d+)/', link['href'])
                     if campaign_id_match:
                         campaign_id = campaign_id_match.group(1)
                         completed_campaigns.append({
                             'id': campaign_id,
-                            'assign_url': f"https://adsha.re{assign_link['href']}",
+                            'assign_url': f"https://adsha.re{link['href']}",
                         })
-                        print(f"✓ Found {config['campaign_status']} campaign {campaign_id} to reactivate.")
+                        print(f"✓ Found {config['campaign_status']} campaign {campaign_id}")
                     else:
-                        print("✗ Could not extract campaign ID from link")
+                        print("✗ Could not extract campaign ID")
                 else:
-                    print("✗ No assign link found in this block")
-                    
-                    # Debug: print all links in this block
-                    all_links = block.find_all('a')
-                    print(f"DEBUG: All links in block: {[link.get('href', '') for link in all_links]}")
+                    print(f"✗ Parent context does not contain '{config['campaign_status']}'")
             else:
-                print(f"✗ Block does not contain '{config['campaign_status']}' status")
-                
+                print("✗ No parent div found for this link")
+        
+        # METHOD 2: Search for any element containing COMPLETE and visitors
+        if not completed_campaigns:
+            print("\nMETHOD 2: Searching for elements with COMPLETE status...")
+            elements_with_complete = soup.find_all(string=re.compile(config['campaign_status'], re.IGNORECASE))
+            print(f"Found {len(elements_with_complete)} elements containing '{config['campaign_status']}'")
+            
+            for element in elements_with_complete:
+                parent = element.find_parent()
+                if parent:
+                    parent_text = parent.get_text()
+                    if 'visitors' in parent_text.lower():
+                        print(f"Found element with COMPLETE and visitors: {parent_text[:200]}...")
+                        
+                        # Look for assign link in this context
+                        assign_link = parent.find('a', href=lambda href: href and '/adverts/assign/' in href)
+                        if assign_link:
+                            campaign_id_match = re.search(r'/adverts/assign/(\d+)/', assign_link['href'])
+                            if campaign_id_match:
+                                campaign_id = campaign_id_match.group(1)
+                                completed_campaigns.append({
+                                    'id': campaign_id,
+                                    'assign_url': f"https://adsha.re{assign_link['href']}",
+                                })
+                                print(f"✓ Found {config['campaign_status']} campaign {campaign_id}")
+                                break
+        
         return completed_campaigns
         
     except Exception as e:
         print(f"Error getting campaigns: {e}")
+        import traceback
+        traceback.print_exc()
         return []
 
 def assign_visitors(session, assign_url, config, dry_run=False):
@@ -126,7 +172,7 @@ def assign_visitors(session, assign_url, config, dry_run=False):
         
         soup = BeautifulSoup(response.text, 'html.parser')
         
-        # Find form - try multiple selectors
+        # Find form
         form = soup.find('form')
         if not form:
             print("  ✗ Could not find assignment form")
@@ -186,7 +232,7 @@ def run_daily_assignment():
     completed_campaigns = get_completed_campaigns(session, config)
 
     if not completed_campaigns:
-        print(f"✗ No {config['campaign_status']} campaigns found")
+        print(f"✗ No {config['campaign_status']} campaigns found to reactivate")
         return
         
     # Process campaigns
