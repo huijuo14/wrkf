@@ -1,258 +1,331 @@
 #!/usr/bin/env python3
 """
-AdShare Daily Visitor Assigner - Debug Version
+AdShare Daily Visitor Assigner - Fixed with Working Login
 """
 import os
 import re
 import time
-import argparse
 import requests
+import pickle
 from bs4 import BeautifulSoup
 from datetime import datetime
 import pytz
-from adshare_login import get_session
 
-# Default configuration
-DEFAULT_CONFIG = {
-    'adverts_url': "https://adsha.re/adverts",
-    'username': os.environ.get('ADSHARE_USERNAME', "jiocloud90@gmail.com"),
-    'password': os.environ.get('ADSHARE_PASSWORD', "@Sd2007123"),
-    'visitors_per_campaign': 50,
-    'max_campaigns_per_run': 1,
-    'campaign_speed': '2',
-    'text_ads': '0',
-    'url_ads': '0',
-    'bid_amount': '0',
-    'request_timeout': 15,
-    'campaign_status': 'COMPLETE',
-}
+# Configuration
+BASE_URL = "https://adsha.re"
+USERNAME = os.environ.get('ADSHARE_USERNAME', "jiocloud90@gmail.com")
+PASSWORD = os.environ.get('ADSHARE_PASSWORD', "@Sd2007123")
+COOKIE_FILE = "session_cookies.pkl"
 
-def load_config():
-    config = DEFAULT_CONFIG.copy()
-    config['username'] = os.environ.get('ADSHARE_USERNAME', config['username'])
-    config['password'] = os.environ.get('ADSHARE_PASSWORD', config['password'])
-    config['visitors_per_campaign'] = int(os.environ.get('ADSHARE_VISITORS_PER_CAMPAIGN', config['visitors_per_campaign']))
-    config['max_campaigns_per_run'] = int(os.environ.get('ADSHARE_MAX_CAMPAIGNS', config['max_campaigns_per_run']))
-    return config
+def load_cookies():
+    """Load cookies from file if it exists"""
+    if os.path.exists(COOKIE_FILE):
+        try:
+            with open(COOKIE_FILE, 'rb') as f:
+                jar = pickle.load(f)
+                return jar
+        except Exception as e:
+            print(f"Error loading cookies: {e}")
+    return None
 
-def debug_page_content(soup):
-    """Print debug information about the page content"""
-    print("\n" + "="*80)
-    print("DEBUG: PAGE CONTENT ANALYSIS")
-    print("="*80)
-    
-    # Print page title
-    title = soup.find('title')
-    print(f"Page Title: {title.get_text() if title else 'No title found'}")
-    
-    # Print all text content to see what's actually on the page
-    all_text = soup.get_text()
-    lines = [line.strip() for line in all_text.split('\n') if line.strip()]
-    
-    print(f"\nTop 20 text lines on page:")
-    for i, line in enumerate(lines[:20]):
-        print(f"{i+1:2d}: {line}")
-    
-    # Look for any divs that might be campaigns
-    all_divs = soup.find_all('div')
-    print(f"\nTotal div elements found: {len(all_divs)}")
-    
-    # Look for campaign indicators
-    campaign_indicators = []
-    for i, div in enumerate(all_divs):
-        div_text = div.get_text().strip()
-        if any(keyword in div_text.lower() for keyword in ['complete', 'active', 'visitors', 'my advert', 'campaign']):
-            campaign_indicators.append((i, div_text[:100]))
-    
-    print(f"\nDivs with campaign keywords: {len(campaign_indicators)}")
-    for idx, text in campaign_indicators[:10]:  # Show first 10
-        print(f"  Div {idx}: {text}...")
-    
-    # Look for all links
-    all_links = soup.find_all('a', href=True)
-    assign_links = [link for link in all_links if '/adverts/assign/' in link['href']]
-    
-    print(f"\nAll links containing '/adverts/assign/': {len(assign_links)}")
-    for link in assign_links:
-        print(f"  Assign link: {link['href']}")
-        # Check parent elements for campaign info
-        parent = link.find_parent('div')
-        if parent:
-            parent_text = parent.get_text().strip()
-            print(f"    Parent text: {parent_text[:100]}...")
-    
-    print("="*80 + "\n")
-
-def get_completed_campaigns(session, config):
-    """Finds campaigns marked with specified status that can have visitors assigned."""
+def save_cookies(jar):
+    """Save cookies to file"""
     try:
-        response = session.get(config['adverts_url'], timeout=config['request_timeout'])
+        with open(COOKIE_FILE, 'wb') as f:
+            pickle.dump(jar, f)
+        print("Cookies saved successfully")
+    except Exception as e:
+        print(f"Error saving cookies: {e}")
+
+def get_login_form_details(session):
+    """Get dynamic login form details"""
+    try:
+        response = session.get(f'{BASE_URL}/login')
+        soup = BeautifulSoup(response.text, 'html.parser')
+        login_form = soup.find('form')
+
+        if not login_form:
+            print("Could not find login form")
+            return None, None, None
+
+        # Get the actual form action URL
+        form_action = login_form.get('action')
+        if form_action.startswith('/'):
+            login_url = BASE_URL + form_action
+        elif not form_action.startswith('http'):
+            login_url = BASE_URL + '/' + form_action
+        else:
+            login_url = form_action
+
+        # Find email and password fields
+        email_field = None
+        password_field = None
+
+        all_inputs = login_form.find_all('input')
+        for inp in all_inputs:
+            inp_type = inp.get('type', 'text')
+            inp_value = inp.get('value', '')
+            inp_name = inp.get('name', '')
+
+            # Look for email field
+            if inp_type == 'text' or inp_type == 'email':
+                inp_value_lower = inp_value.lower()
+                if 'email' in inp_value_lower or 'mail' in inp_value_lower or 'address' in inp_value_lower or 'email' in inp_name.lower():
+                    email_field = inp_name
+            # Look for password field (has 'Password' as the value)
+            elif inp_value == 'Password':
+                password_field = inp_name
+            # Special case: password field might have 'password' as type
+            elif inp_type == 'password':
+                password_field = inp_name
+
+        return login_url, email_field, password_field
+    except Exception as e:
+        print(f"Error getting login form details: {e}")
+        return None, None, None
+
+def login(session):
+    """Perform login with dynamic form fields"""
+    login_url, email_field, password_field = get_login_form_details(session)
+
+    if not login_url or not email_field or not password_field:
+        print("Failed to get login form details")
+        return False
+
+    # Prepare login data with correct field names
+    login_data = {
+        email_field: USERNAME,
+        password_field: PASSWORD,
+    }
+
+    print(f"Attempting login with fields: {email_field}, {password_field}")
+    
+    try:
+        response = session.post(login_url, data=login_data, timeout=15)
+        print(f"Login response status: {response.status_code}")
+        
+        # Check if login was successful by looking for account-related elements
+        if 'account' in response.text.lower() or 'logout' in response.text.lower() or response.url != f'{BASE_URL}/login':
+            print("Login successful!")
+            return True
+        else:
+            print("Login may have failed. Checking response...")
+            # Check if still on login page
+            if 'email address' in response.text.lower() and 'password' in response.text.lower():
+                print("Login failed - still on login page")
+                return False
+            else:
+                print("Login response doesn't show login page, assuming success")
+                return True
+    except Exception as e:
+        print(f"Error during login: {e}")
+        return False
+
+def get_session():
+    """Get authenticated session using the working login approach"""
+    session = requests.Session()
+    
+    # Try to load existing cookies
+    loaded_cookies = load_cookies()
+    if loaded_cookies:
+        session.cookies = loaded_cookies
+        print("Loaded existing cookies")
+        
+        # Verify session is still valid
+        try:
+            verify_response = session.get(f"{BASE_URL}/adverts", timeout=10)
+            if 'login' in verify_response.text.lower() or verify_response.status_code == 403:
+                print("Session appears invalid, performing fresh login")
+                session = requests.Session()  # Create a new session
+                if not login(session):
+                    print("Login failed, exiting")
+                    return None
+                save_cookies(session.cookies)
+            else:
+                print("Session is valid")
+        except Exception as e:
+            print(f"Could not verify session: {e}, performing fresh login")
+            session = requests.Session()
+            if not login(session):
+                print("Login failed, exiting")
+                return None
+            save_cookies(session.cookies)
+    else:
+        print("No existing cookies, performing fresh login")
+        if not login(session):
+            print("Login failed, exiting")
+            return None
+        save_cookies(session.cookies)
+    
+    return session
+
+def get_completed_campaigns(session):
+    """Find completed campaigns that can have visitors assigned"""
+    try:
+        response = session.get(f'{BASE_URL}/adverts', timeout=15)
         response.raise_for_status()
+        
+        # Debug: Check if we're actually logged in
+        if 'login' in response.text.lower() and 'email' in response.text.lower():
+            print("ERROR: Not logged in - showing login page")
+            return []
+        
         soup = BeautifulSoup(response.text, 'html.parser')
         completed_campaigns = []
 
-        # First, debug the page content
-        debug_page_content(soup)
+        print("DEBUG: Searching for campaigns on adverts page...")
         
-        # METHOD 1: Direct search for assign links and check their context
-        print("METHOD 1: Searching for assignment links directly...")
+        # METHOD 1: Look for "Assign More Visitors" links and check their context
         assign_links = soup.find_all('a', href=lambda href: href and '/adverts/assign/' in href)
-        print(f"Found {len(assign_links)} assignment links")
+        print(f"DEBUG: Found {len(assign_links)} assignment links")
         
         for link in assign_links:
-            print(f"Checking assignment link: {link['href']}")
+            print(f"DEBUG: Checking assignment link: {link['href']}")
             
-            # Get the parent context to check status
-            parent = link.find_parent('div')
-            if parent:
-                parent_text = parent.get_text()
-                print(f"Parent context: {parent_text[:200]}...")
+            # Get parent context to check if campaign is COMPLETE
+            parent_div = link.find_parent('div')
+            if parent_div:
+                parent_text = parent_div.get_text()
+                print(f"DEBUG: Parent context: {parent_text[:150]}...")
                 
-                if config['campaign_status'].lower() in parent_text.lower():
+                # Check if this campaign is COMPLETE
+                if 'complete' in parent_text.lower():
                     # Extract campaign ID
                     campaign_id_match = re.search(r'/adverts/assign/(\d+)/', link['href'])
                     if campaign_id_match:
                         campaign_id = campaign_id_match.group(1)
                         completed_campaigns.append({
                             'id': campaign_id,
-                            'assign_url': f"https://adsha.re{link['href']}",
+                            'assign_url': f"{BASE_URL}{link['href']}",
                         })
-                        print(f"✓ Found {config['campaign_status']} campaign {campaign_id}")
+                        print(f"✓ Found COMPLETE campaign {campaign_id}")
                     else:
                         print("✗ Could not extract campaign ID")
                 else:
-                    print(f"✗ Parent context does not contain '{config['campaign_status']}'")
+                    print("✗ Campaign is not COMPLETE")
             else:
-                print("✗ No parent div found for this link")
+                print("✗ No parent div found for assignment link")
         
-        # METHOD 2: Search for any element containing COMPLETE and visitors
+        # METHOD 2: If no links found, search for campaign blocks by content
         if not completed_campaigns:
-            print("\nMETHOD 2: Searching for elements with COMPLETE status...")
-            elements_with_complete = soup.find_all(string=re.compile(config['campaign_status'], re.IGNORECASE))
-            print(f"Found {len(elements_with_complete)} elements containing '{config['campaign_status']}'")
+            print("DEBUG: Trying alternative search method...")
             
-            for element in elements_with_complete:
-                parent = element.find_parent()
-                if parent:
-                    parent_text = parent.get_text()
-                    if 'visitors' in parent_text.lower():
-                        print(f"Found element with COMPLETE and visitors: {parent_text[:200]}...")
-                        
-                        # Look for assign link in this context
-                        assign_link = parent.find('a', href=lambda href: href and '/adverts/assign/' in href)
-                        if assign_link:
-                            campaign_id_match = re.search(r'/adverts/assign/(\d+)/', assign_link['href'])
-                            if campaign_id_match:
-                                campaign_id = campaign_id_match.group(1)
-                                completed_campaigns.append({
-                                    'id': campaign_id,
-                                    'assign_url': f"https://adsha.re{assign_link['href']}",
-                                })
-                                print(f"✓ Found {config['campaign_status']} campaign {campaign_id}")
-                                break
+            # Look for divs that contain campaign information
+            all_divs = soup.find_all('div')
+            for div in all_divs:
+                div_text = div.get_text()
+                if 'complete' in div_text.lower() and 'visitors' in div_text.lower():
+                    print(f"DEBUG: Found COMPLETE campaign block: {div_text[:100]}...")
+                    
+                    # Find assign link in this div
+                    assign_link = div.find('a', href=lambda href: href and '/adverts/assign/' in href)
+                    if assign_link:
+                        campaign_id_match = re.search(r'/adverts/assign/(\d+)/', assign_link['href'])
+                        if campaign_id_match:
+                            campaign_id = campaign_id_match.group(1)
+                            completed_campaigns.append({
+                                'id': campaign_id,
+                                'assign_url': f"{BASE_URL}{assign_link['href']}",
+                            })
+                            print(f"✓ Found COMPLETE campaign {campaign_id} via content search")
+                            break
         
         return completed_campaigns
         
     except Exception as e:
         print(f"Error getting campaigns: {e}")
-        import traceback
-        traceback.print_exc()
         return []
 
-def assign_visitors(session, assign_url, config, dry_run=False):
-    """Submits the form to assign more visitors to a campaign."""
+def assign_visitors(session, assign_url, num_visitors=50):
+    """Assign visitors to a campaign"""
     try:
-        if dry_run:
-            print(f"  [DRY RUN] Would assign {config['visitors_per_campaign']} visitors")
-            return True
-
-        print(f"  Navigating to: {assign_url}")
-        response = session.get(assign_url, timeout=config['request_timeout'])
+        print(f"  Navigating to assignment page: {assign_url}")
+        response = session.get(assign_url, timeout=15)
         response.raise_for_status()
         
         soup = BeautifulSoup(response.text, 'html.parser')
         
-        # Find form
+        # Find the assignment form
         form = soup.find('form')
         if not form:
             print("  ✗ Could not find assignment form")
             return False
 
-        # Get form action
-        action_url = form.get('action', '')
+        # Get form action URL
+        action_url = form.get('action')
         if not action_url.startswith('http'):
-            action_url = f"https://adsha.re{action_url}"
+            action_url = f"{BASE_URL}{action_url}"
             
         print(f"  Form action: {action_url}")
 
-        # Extract campaign ID
+        # Extract campaign ID from assign_url
         campaign_id_match = re.search(r'/assign/(\d+)/', assign_url)
         campaign_id = campaign_id_match.group(1) if campaign_id_match else "unknown"
         
-        # Prepare payload
+        # Prepare form payload
         payload = {
-            'vis': str(config['visitors_per_campaign']),
-            'bid': config['bid_amount'],
-            'spe': config['campaign_speed'],
-            'txt': config['text_ads'],
-            'url': config['url_ads'],
+            'vis': str(num_visitors),
+            'bid': '0',
+            'spe': '2',  # Faster - Revisit in 12 hours
+            'txt': '0',
+            'url': '0', 
             'aid': campaign_id,
         }
 
-        print(f"  Submitting form for campaign {campaign_id}...")
+        print(f"  Submitting assignment of {num_visitors} visitors for campaign {campaign_id}...")
         
-        submit_response = session.post(action_url, data=payload, timeout=config['request_timeout'])
+        submit_response = session.post(action_url, data=payload, timeout=15)
         submit_response.raise_for_status()
         
-        print(f"  ✓ Successfully assigned {config['visitors_per_campaign']} visitors to campaign {campaign_id}")
-        return True
+        # Check if assignment was successful
+        if "visitors" in submit_response.text.lower() or "assign" in submit_response.text.lower():
+            print(f"  ✓ Successfully assigned {num_visitors} visitors to campaign {campaign_id}")
+            # Save updated cookies
+            save_cookies(session.cookies)
+            return True
+        else:
+            print("  ✗ Assignment may have failed - check response")
+            return False
             
     except Exception as e:
         print(f"  ✗ Failed to assign visitors: {e}")
         return False
 
 def run_daily_assignment():
-    """Main function to find and reactivate completed campaigns."""
-    config = load_config()
-    
-    # Display current time
+    """Main function to run daily visitor assignment"""
+    # Display current time in IST
     ist = pytz.timezone('Asia/Kolkata')
     current_time_ist = datetime.now(ist)
     print(f"--- Starting Daily Visitor Assignment at {current_time_ist:%Y-%m-%d %H:%M:%S} IST ---")
-    print(f"Configuration: {config['visitors_per_campaign']} visitors, {config['max_campaigns_per_run']} max campaigns, status: {config['campaign_status']}")
+    print(f"Configuration: 50 visitors, 1 max campaign, status: COMPLETE")
 
-    # Login
-    session = get_session(config['username'], config['password'])
+    # Get authenticated session
+    session = get_session()
     if not session:
-        print("✗ Could not establish session")
+        print("✗ Could not establish authenticated session")
         return
 
-    # Find campaigns
-    print("Searching for campaigns...")
-    completed_campaigns = get_completed_campaigns(session, config)
+    print("Waiting 3 seconds for session stabilization...")
+    time.sleep(3)
+
+    # Find completed campaigns
+    print("Searching for COMPLETE campaigns...")
+    completed_campaigns = get_completed_campaigns(session)
 
     if not completed_campaigns:
-        print(f"✗ No {config['campaign_status']} campaigns found to reactivate")
+        print("✗ No COMPLETE campaigns found to reactivate")
         return
         
-    # Process campaigns
-    campaigns_to_process = completed_campaigns[:config['max_campaigns_per_run']]
-    successful_assignments = 0
+    # Process up to 1 campaign
+    campaign = completed_campaigns[0]
+    print(f"✓ Found COMPLETE campaign {campaign['id']}, attempting to reactivate...")
     
-    print(f"✓ Found {len(completed_campaigns)} campaigns, processing {len(campaigns_to_process)}")
-    
-    for campaign in campaigns_to_process:
-        print(f"\nAttempting to reactivate campaign {campaign['id']}...")
-        
-        if assign_visitors(session, campaign['assign_url'], config):
-            successful_assignments += 1
-            print(f"✓ Successfully reactivated campaign {campaign['id']}")
-        else:
-            print(f"✗ Failed to reactivate campaign {campaign['id']}")
+    if assign_visitors(session, campaign['assign_url'], num_visitors=50):
+        print(f"✓ Successfully reactivated campaign {campaign['id']} with 50 visitors")
+    else:
+        print(f"✗ Failed to reactivate campaign {campaign['id']}")
 
     print(f"\n--- Daily Visitor Assignment Complete ---")
-    print(f"Processed: {len(campaigns_to_process)} campaigns")
-    print(f"Successful: {successful_assignments} assignments")
 
 if __name__ == "__main__":
     run_daily_assignment()
