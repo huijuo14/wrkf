@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-AdShare Final Refined Bid Monitor
-Based on the successful workingbid_monitor.py with improvements
+AdShare Smart Bid Monitor with Campaign Status Checking
+Fixes the credit wasting issue by checking campaign status before bidding
 """
 import os
 import re
@@ -121,6 +121,53 @@ def login(session):
         print(f"Error during login: {e}")
         return False
 
+def get_campaign_status(session, campaign_id):
+    """Get the status of a campaign (ACTIVE, COMPLETE, PAUSED, etc.)"""
+    try:
+        response = session.get(f'{BASE_URL}/adverts', timeout=15)
+        if response.status_code != 200:
+            print(f"Failed to get adverts page for status check")
+            return "UNKNOWN"
+
+        soup = BeautifulSoup(response.text, 'html.parser')
+        
+        # Look for the campaign block that contains this campaign ID
+        campaign_blocks = soup.find_all('div')
+        
+        for block in campaign_blocks:
+            block_text = block.get_text()
+            
+            # Check if this block contains our campaign ID in any links
+            campaign_links = block.find_all('a', href=lambda href: href and f'/adverts/bid/{campaign_id}/' in href)
+            if not campaign_links:
+                # Also check for other action links with this campaign ID
+                campaign_links = block.find_all('a', href=lambda href: href and f'/{campaign_id}/' in href and '/adverts/' in href)
+            
+            if campaign_links:
+                # Found a block with our campaign, now check its status
+                block_text_lower = block_text.lower()
+                
+                if 'complete' in block_text_lower:
+                    return "COMPLETE"
+                elif 'active' in block_text_lower:
+                    return "ACTIVE"
+                elif 'paused' in block_text_lower:
+                    return "PAUSED"
+                elif 'pending' in block_text_lower:
+                    return "PENDING"
+                else:
+                    # If no explicit status found, check for visitor counts
+                    if 'visitors' in block_text_lower:
+                        return "ACTIVE"  # Assume active if has visitors
+                    else:
+                        return "UNKNOWN"
+        
+        return "NOT_FOUND"
+        
+    except Exception as e:
+        print(f"Error getting campaign status for {campaign_id}: {e}")
+        return "ERROR"
+
 def get_all_campaigns(session):
     """Dynamically get all campaigns from the adverts page"""
     try:
@@ -146,8 +193,6 @@ def get_all_campaigns(session):
             href = link.get('href', '')
 
             # Look for various campaign-related URL patterns that contain campaign IDs
-            # Examples: /adverts/pause/{id}/{token}, /adverts/delete/{id}/{token}, /adverts/assign/{id}/{token}
-            # All of these contain a campaign ID after the action type
             patterns = [
                 r'/adverts/pause/(\d+)/',
                 r'/adverts/delete/(\d+)/',
@@ -165,13 +210,10 @@ def get_all_campaigns(session):
                         print(f"Found campaign {campaign_id} from action link")
 
         # Look for campaigns that might be identified by name but don't have visible bid links
-        # (These may show bid links only when not at the top bid)
         for element in all_elements:
             parent = element.find_parent()
-            # Look for any numeric IDs associated with this element
             if parent:
                 parent_text = str(parent)
-                # Look for patterns that might contain campaign IDs near the "My Advert" text
                 campaign_matches = re.findall(r'/adverts/(?:pause|delete|assign|bid)/(\d+)/', parent_text)
                 for match in campaign_matches:
                     if match not in campaign_ids:
@@ -179,8 +221,6 @@ def get_all_campaigns(session):
                         print(f"Found campaign {match} from 'My Advert' association")
 
         # Also check our known campaign that has bid functionality
-        # This ensures we don't miss campaigns that may not appear on the main page
-        # but still need bid monitoring
         known_campaigns_with_bidding = ['2641']  # Add others if discovered later
         for known_campaign in known_campaigns_with_bidding:
             if known_campaign not in campaign_ids:
@@ -227,11 +267,6 @@ def find_bid_url_for_campaign_id(session, campaign_id):
 
     # If not found on main page, we can try to check if this specific campaign has bid functionality
     # by attempting to access different variations of bid URLs
-    # Since we don't know the token, we'll need another approach
-    # For now, let's assume if it's a valid campaign it might have bidding
-
-    # We'll return a special marker that will trigger a more detailed search
-    # For the most common case, like campaign 2641 that we know has bidding functionality
     known_bid_tokens = {
         '2641': '9c11d5c78ca339eee3c02533cae3aaabd292f7711a35ed4575a5e9eacb1100396ec99c4f8c0cd807ac1acac44ab85e847cebbae08b90a3575d3aca99128ad1ec'
     }
@@ -263,7 +298,7 @@ def get_current_bid_info(session, campaign):
         # Try multiple patterns to find the top bid in the page
         top_bid_patterns = [
             r'top\s+bid\s+is\s+(\d+)\s+credits?',
-            r'bid.*?you.*?(\d+).*?top.*?(\d+)',  # For patterns like "bid: you 5, top 7"
+            r'bid.*?you.*?(\d+).*?top.*?(\d+)',
             r'top.*?bid.*?(\d+)',
             r'(\d+).*?top.*?bid',
             r'current.*?top.*?(\d+)'
@@ -272,30 +307,25 @@ def get_current_bid_info(session, campaign):
         for pattern in top_bid_patterns:
             top_bid_match = re.search(pattern, page_text, re.IGNORECASE)
             if top_bid_match:
-                # The pattern might return multiple groups (e.g., for "bid: you 5, top 7")
                 groups = top_bid_match.groups()
                 if len(groups) > 1 and 'you' in pattern.lower():
-                    # Special handling for patterns that capture both current and top bid
-                    # In "bid.*?you.*?(\d+).*?top.*?(\d+)", group(1) is user bid, group(2) is top bid
                     try:
-                        top_bid = int(groups[1])  # Second group should be the top bid
+                        top_bid = int(groups[1])
                     except (ValueError, IndexError):
-                        # Fallback to processing individually
                         for group in groups:
                             if group and group.isdigit():
                                 potential_top = int(group)
-                                if potential_top != current_bid:  # Don't set top_bid to same as current
+                                if potential_top != current_bid:
                                     top_bid = potential_top
                                     break
                 else:
-                    # Process single groups as before
                     for group in groups:
                         if group and group.isdigit():
                             potential_top = int(group)
-                            if potential_top != current_bid:  # Don't set top_bid to same as current
+                            if potential_top != current_bid:
                                 top_bid = potential_top
                                 break
-                if top_bid != current_bid:  # Only break if we found a different value
+                if top_bid != current_bid:
                     break
 
         print(f"  Parsed bid info: Current Bid={current_bid}, Top Bid={top_bid}")
@@ -309,7 +339,7 @@ def adjust_bid(session, campaign, new_bid):
     try:
         bid_data = {
             'bid': str(new_bid),
-            'vis': '0'  # Hidden field that's required
+            'vis': '0'
         }
 
         response = session.post(campaign['bid_url'], data=bid_data, timeout=15)
@@ -325,7 +355,7 @@ def adjust_bid(session, campaign, new_bid):
 
 def run_bid_monitor_once():
     """Main function to run one cycle of the bid monitor."""
-    print(f"--- Starting Final Refined Bid Monitor Cycle at {datetime.now():%Y-%m-%d %H:%M:%S} ---")
+    print(f"--- Starting Smart Bid Monitor Cycle at {datetime.now():%Y-%m-%d %H:%M:%S} ---")
 
     # Create session
     session = requests.Session()
@@ -341,7 +371,7 @@ def run_bid_monitor_once():
             verify_response = session.get(f"{BASE_URL}/adverts", timeout=10)
             if 'login' in verify_response.text.lower() or verify_response.status_code == 403:
                 print("Session appears invalid, performing fresh login")
-                session = requests.Session()  # Create a new session
+                session = requests.Session()
                 if not login(session):
                     print("Login failed, exiting")
                     return
@@ -350,7 +380,7 @@ def run_bid_monitor_once():
                 print("Session is valid")
         except:
             print("Could not verify session, performing fresh login")
-            session = requests.Session()  # Create a new session
+            session = requests.Session()
             if not login(session):
                 print("Login failed, exiting")
                 return
@@ -375,6 +405,15 @@ def run_bid_monitor_once():
     for campaign in campaigns:
         print(f"\nChecking campaign {campaign['id']}")
 
+        # NEW: Check campaign status before doing anything
+        status = get_campaign_status(session, campaign['id'])
+        print(f"  Campaign status: {status}")
+
+        # Only adjust bids for ACTIVE campaigns
+        if status != "ACTIVE":
+            print(f"  ⚠️  Skipping bid adjustment - campaign is {status}")
+            continue
+
         current_bid, top_bid = get_current_bid_info(session, campaign)
         if current_bid is not None and top_bid is not None:
             print(f"  Current bid: {current_bid}, Top bid: {top_bid}")
@@ -386,7 +425,6 @@ def run_bid_monitor_once():
                 print(f"  Current bid is below desired ({desired_bid}), adjusting...")
                 if adjust_bid(session, campaign, desired_bid):
                     print(f"  Bid adjusted to {desired_bid}")
-                    # Save cookies after successful update
                     save_cookies(session.cookies)
                 else:
                     print("  Failed to adjust bid, continuing...")
@@ -395,7 +433,7 @@ def run_bid_monitor_once():
         else:
             print(f"  Failed to get bid info for campaign {campaign['id']}, skipping...")
 
-    print("\n--- Final Refined Bid Monitor Cycle Finished ---")
+    print("\n--- Smart Bid Monitor Cycle Finished ---")
 
 if __name__ == "__main__":
     run_bid_monitor_once()
