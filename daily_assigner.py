@@ -257,7 +257,7 @@ def assign_visitors(session, assign_url, num_visitors=50):
         # Prepare form payload - FIX: Use the values from the actual form we found
         payload = {
             'vis': str(num_visitors),
-            'bid': '15',  # Set to 15 (top bid + 2) instead of 0
+            'bid': '0',  # Set to 15 (top bid + 2) instead of 0
             'spe': '2',   # Faster - Revisit in 12 hours
             'txt': '0',
             'url': '0', 
@@ -315,8 +315,8 @@ def run_daily_assignment():
     campaign = completed_campaigns[0]
     print(f"✓ Found COMPLETE campaign {campaign['id']}, attempting to reactivate...")
     
-    if assign_visitors(session, campaign['assign_url'], num_visitors=50):
-        print(f"✓ Successfully reactivated campaign {campaign['id']} with 50 visitors")
+    if assign_visitors(session, campaign['assign_url'], num_visitors=1000):
+        print(f"✓ Successfully reactivated campaign {campaign['id']} with 1000 visitors")
     else:
         print(f"✗ Failed to reactivate campaign {campaign['id']}")
 
