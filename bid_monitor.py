@@ -11,7 +11,6 @@ import sys
 import requests
 from bs4 import BeautifulSoup
 from datetime import datetime
-from http.cookiejar import MozillaCookieJar
 
 # Import the login module
 import adshare_login
@@ -20,43 +19,7 @@ import adshare_login
 BASE_URL = "https://adsha.re"
 USERNAME = os.environ.get('ADSHARE_USERNAME', "jiocloud90@gmail.com")
 PASSWORD = os.environ.get('ADSHARE_PASSWORD', "@Sd2007123")
-COOKIE_FILE = "cookies.txt"  # Changed to Netscape format
-
-def load_cookies():
-    """Load cookies from Netscape format file if it exists"""
-    if os.path.exists(COOKIE_FILE):
-        try:
-            jar = MozillaCookieJar(COOKIE_FILE)
-            jar.load(ignore_discard=True, ignore_expires=True)
-            print(f"Loaded {len(jar)} cookies from {COOKIE_FILE}")
-            return jar
-        except Exception as e:
-            print(f"Error loading cookies from {COOKIE_FILE}: {e}")
-    return None
-
-def save_cookies(jar):
-    """Save cookies to Netscape format file"""
-    try:
-        if not isinstance(jar, MozillaCookieJar):
-            # Convert requests.cookies.RequestsCookieJar to MozillaCookieJar
-            mozilla_jar = MozillaCookieJar(COOKIE_FILE)
-            for cookie in jar:
-                # Create a cookie with proper attributes
-                mozilla_cookie = requests.cookies.create_cookie(
-                    name=cookie.name,
-                    value=cookie.value,
-                    domain=cookie.domain,
-                    path=cookie.path
-                )
-                mozilla_jar.set_cookie(mozilla_cookie)
-            jar = mozilla_jar
-        
-        jar.save(ignore_discard=True, ignore_expires=True)
-        print(f"Cookies saved to {COOKIE_FILE} (Netscape format)")
-        return True
-    except Exception as e:
-        print(f"Error saving cookies to {COOKIE_FILE}: {e}")
-        return False
+COOKIE_FILE = "cookies.txt"  # Now using Netscape format
 
 def get_campaign_status(session, campaign_id):
     """Get the status of a campaign (ACTIVE, COMPLETE, PAUSED, etc.)"""
@@ -336,9 +299,6 @@ def run_bid_monitor_once():
                 if adjust_bid(session, campaign, desired_bid):
                     print(f"  ✓ Bid adjusted to {desired_bid}")
                     successful_adjustments += 1
-                    # Save cookies after successful bid adjustment using adshare_login function
-                    if hasattr(adshare_login, 'save_cookies'):
-                        adshare_login.save_cookies(session.cookies)
                 else:
                     print("  ✗ Failed to adjust bid, continuing...")
             else:
