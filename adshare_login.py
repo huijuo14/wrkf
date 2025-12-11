@@ -7,6 +7,7 @@ Uses Netscape cookie format for compatibility with other tools.
 import os
 import time
 import sys
+import traceback
 from http.cookiejar import MozillaCookieJar
 import requests
 from bs4 import BeautifulSoup
@@ -85,9 +86,9 @@ def get_session(username, password):
             else:
                 print("Session expired or invalid. Re-logging in...")
         except requests.exceptions.RequestException as e:
-            print(f"Session validation failed: {e}. Proceeding to re-login.")
+            print(f"Session validation failed: {e}. Proceeding to re-loggin.")
     
-    # Perform login
+    # Perform login - using the original form parsing logic
     print("Performing dynamic login...")
     for attempt in range(3):
         try:
@@ -98,83 +99,224 @@ def get_session(username, password):
             response.raise_for_status()
             soup = BeautifulSoup(response.text, 'html.parser')
             
-            # Find login form
+            # Find login form - using multiple methods to find it
             login_form = soup.find('form')
+            
+            # If no form found with simple find, try more specific searches
             if not login_form:
+                # Try to find form by common attributes
+                login_form = soup.find('form', {'method': 'post'})
+            
+            if not login_form:
+                # Try to find form by action attribute containing 'login'
+                login_form = soup.find('form', action=lambda x: x and 'login' in x.lower())
+            
+            if not login_form:
+                # Try to find any form that has email and password fields
+                all_forms = soup.find_all('form')
+                for form in all_forms:
+                    # Check if form has input fields that look like login fields
+                    inputs = form.find_all('input')
+                    has_email = False
+                    has_password = False
+                    for inp in inputs:
+                        inp_type = inp.get('type', '').lower()
+                        inp_name = inp.get('name', '').lower()
+                        if inp_type == 'email' or 'email' in inp_name:
+                            has_email = True
+                        if inp_type == 'password' or 'password' in inp_name:
+                            has_password = True
+                    if has_email and has_password:
+                        login_form = form
+                        break
+            
+            if not login_form:
+                # Debug: print page to see what we're working with
+                print("DEBUG: Could not find login form. Page snippet:")
+                print(soup.prettify()[:1000])
                 raise ValueError("Could not find login form.")
             
-            # Extract form action
+            print(f"Found login form with method: {login_form.get('method', 'POST')}")
+            
+            # Extract form action - using original logic
             action = login_form.get('action')
             if action:
-                login_action_url = f"{BASE_URL}{action}" if action.startswith('/') else action
+                # Handle relative and absolute URLs
+                if action.startswith('/'):
+                    login_action_url = f"{BASE_URL}{action}"
+                elif action.startswith('http'):
+                    login_action_url = action
+                else:
+                    login_action_url = f"{BASE_URL}/{action}"
             else:
                 login_action_url = f"{BASE_URL}/login"
             
-            # Find form inputs - more flexible approach
-            inputs = login_form.find_all('input')
-            payload = {}
+            print(f"Login action URL: {login_action_url}")
             
-            for inp in inputs:
-                name = inp.get('name')
-                if name:
+            # Find email and password inputs - using original logic but more robust
+            email_input = None
+            password_input = None
+            
+            # Try multiple ways to find the email field
+            email_candidates = [
+                login_form.find('input', {'value': 'Email Address'}),
+                login_form.find('input', {'placeholder': 'Email Address'}),
+                login_form.find('input', {'placeholder': 'Email'}),
+                login_form.find('input', {'type': 'email'}),
+                login_form.find('input', {'name': 'email'}),
+                login_form.find('input', {'id': 'email'}),
+                login_form.find('input', {'name': 'username'}),
+                login_form.find('input', {'id': 'username'})
+            ]
+            
+            for candidate in email_candidates:
+                if candidate:
+                    email_input = candidate
+                    break
+            
+            # Try multiple ways to find the password field
+            password_candidates = [
+                login_form.find('input', {'value': 'Password'}),
+                login_form.find('input', {'placeholder': 'Password'}),
+                login_form.find('input', {'type': 'password'}),
+                login_form.find('input', {'name': 'password'}),
+                login_form.find('input', {'id': 'password'}),
+                login_form.find('input', {'name': 'pass'}),
+                login_form.find('input', {'id': 'pass'})
+            ]
+            
+            for candidate in password_candidates:
+                if candidate:
+                    password_input = candidate
+                    break
+            
+            # If still not found, try to find by scanning all inputs
+            if not email_input or not password_input:
+                all_inputs = login_form.find_all('input')
+                for inp in all_inputs:
                     inp_type = inp.get('type', '').lower()
-                    inp_value = inp.get('value', '')
+                    inp_name = inp.get('name', '').lower()
+                    inp_value = inp.get('value', '').lower()
+                    inp_placeholder = inp.get('placeholder', '').lower()
                     
-                    # Fill in credentials
-                    if inp_type == 'email' or 'email' in name.lower() or inp_value == 'Email Address':
-                        payload[name] = username
-                    elif inp_type == 'password' or 'password' in name.lower() or inp_value == 'Password':
-                        payload[name] = password
-                    elif inp_type not in ['submit', 'button']:
-                        # Preserve other fields
-                        payload[name] = inp_value
+                    if not email_input:
+                        if (inp_type == 'email' or 
+                            'email' in inp_name or 
+                            'email' in inp_value or 
+                            'email' in inp_placeholder or
+                            inp_name == 'username'):
+                            email_input = inp
+                    
+                    if not password_input:
+                        if (inp_type == 'password' or 
+                            'password' in inp_name or 
+                            'password' in inp_value or 
+                            'password' in inp_placeholder):
+                            password_input = inp
             
-            # Fallback if we couldn't find fields
-            if not payload:
-                email_input = login_form.find('input', {'type': 'email'}) or \
-                             login_form.find('input', {'name': 'email'}) or \
-                             login_form.find('input', {'placeholder': 'Email'})
-                password_input = login_form.find('input', {'type': 'password'}) or \
-                                login_form.find('input', {'name': 'password'}) or \
-                                login_form.find('input', {'placeholder': 'Password'})
+            if not email_input:
+                raise ValueError("Could not find email field.")
+            if not password_input:
+                raise ValueError("Could not find password field.")
+            
+            print(f"Found email field: name='{email_input.get('name')}'")
+            print(f"Found password field: name='{password_input.get('name')}'")
+            
+            # Prepare payload - include all form fields to be safe
+            payload = {}
+            all_form_inputs = login_form.find_all('input')
+            for inp in all_form_inputs:
+                inp_name = inp.get('name')
+                inp_type = inp.get('type', '').lower()
+                inp_value = inp.get('value', '')
                 
-                if email_input and password_input:
-                    payload = {
-                        email_input.get('name'): username,
-                        password_input.get('name'): password,
-                    }
-                else:
-                    raise ValueError("Could not identify email/password fields.")
+                if inp_name and inp_type not in ['submit', 'button', 'image']:
+                    # Fill in credentials for our fields
+                    if inp is email_input:
+                        payload[inp_name] = username
+                    elif inp is password_input:
+                        payload[inp_name] = password
+                    else:
+                        # Preserve other fields
+                        payload[inp_name] = inp_value
             
-            print(f"Logging in to: {login_action_url}")
+            # Make sure we have the credentials in the payload
+            email_field_name = email_input.get('name')
+            password_field_name = password_input.get('name')
+            
+            if email_field_name not in payload:
+                payload[email_field_name] = username
+            if password_field_name not in payload:
+                payload[password_field_name] = password
+            
+            print(f"Submitting login with {len(payload)} fields...")
             
             # Submit login form
             login_response = session.post(
                 login_action_url, 
                 data=payload, 
                 timeout=15,
-                allow_redirects=True
+                allow_redirects=True,
+                headers={
+                    'Referer': f'{BASE_URL}/login',
+                    'Origin': BASE_URL,
+                    'Content-Type': 'application/x-www-form-urlencoded'
+                }
             )
             login_response.raise_for_status()
             
+            print(f"Login response status: {login_response.status_code}")
+            print(f"Login response URL: {login_response.url}")
+            
             # Check if login was successful
-            if 'adverts' in login_response.url or 'account' in login_response.url:
+            if ('adverts' in login_response.url or 
+                'account' in login_response.url or
+                'dashboard' in login_response.url):
                 print("✓ Login successful!")
                 
                 # Save cookies in Netscape format
                 save_cookies(session.cookies)
                 
                 # Verify we can access protected content
-                verify_response = session.get(f"{BASE_URL}/account", timeout=10)
-                if verify_response.status_code == 200:
-                    print("✓ Account page accessible - session confirmed")
+                try:
+                    verify_response = session.get(f"{BASE_URL}/account", timeout=10)
+                    if verify_response.status_code == 200:
+                        print("✓ Account page accessible - session confirmed")
+                    else:
+                        print(f"⚠ Account page returned status {verify_response.status_code}")
+                except Exception as e:
+                    print(f"⚠ Could not verify account page: {e}")
+                
                 return session
             
-            # Check for common error indicators
+            # Check for error messages in response
             soup = BeautifulSoup(login_response.text, 'html.parser')
-            error_messages = soup.find_all(class_=['error', 'alert', 'danger', 'warning'])
+            
+            # Look for common error indicators
+            error_selectors = [
+                '.error', '.alert-danger', '.alert-error', 
+                '.text-danger', '.login-error', '.error-message',
+                'div[class*="error"]', 'div[class*="alert"]'
+            ]
+            
+            error_messages = []
+            for selector in error_selectors:
+                errors = soup.select(selector)
+                if errors:
+                    for error in errors:
+                        error_text = error.get_text(strip=True)
+                        if error_text and len(error_text) > 3:
+                            error_messages.append(error_text)
+            
             if error_messages:
-                print(f"Login may have failed. Errors found: {[e.text[:50] for e in error_messages]}")
+                print(f"Login failed with errors: {error_messages[:3]}")
+            else:
+                # Check for success messages too
+                success_selectors = ['.success', '.alert-success', '.text-success']
+                for selector in success_selectors:
+                    successes = soup.select(selector)
+                    if successes:
+                        print(f"Found success messages: {[s.get_text(strip=True)[:50] for s in successes[:2]]}")
             
             print(f"Login attempt {attempt + 1} may have failed. Retrying in 2 seconds...")
             time.sleep(2)
@@ -184,7 +326,6 @@ def get_session(username, password):
             time.sleep(5)
         except Exception as e:
             print(f"An unexpected error occurred during login: {e}")
-            import traceback
             traceback.print_exc()
             time.sleep(5)
     
@@ -223,6 +364,11 @@ def main():
     else:
         print("\n" + "=" * 50)
         print("✗ FAILED: Could not establish session")
+        print("\nTroubleshooting tips:")
+        print("1. Check if the website is accessible")
+        print("2. Verify your username and password")
+        print("3. Check if there's a CAPTCHA on the login page")
+        print("4. Try logging in manually first")
         print("=" * 50)
         sys.exit(1)
 
