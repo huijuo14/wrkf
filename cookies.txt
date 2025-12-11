@@ -1,0 +1,8 @@
+# Netscape HTTP Cookie File
+# http://curl.haxx.se/rfc/cookie_spec.html
+# This is a generated file!  Do not edit.
+
+.adsha.re	TRUE	/	FALSE		adshare_d	20251211
+.adsha.re	TRUE	/	FALSE		adshare_e	jiocloud90%40gmail.com
+.adsha.re	TRUE	/	FALSE		adshare_h	https%3A%2F%2Fadsha.re%2Flogin
+.adsha.re	TRUE	/	FALSE		adshare_s	6b8d12984a5b23e537939f08f46f0fa9259aedd45c996dfa586939f54e65c91bb0b83fef9dceed7a9ac06a2f31d817323684627128fbb9d8c1f0fa293f3d7b2d
