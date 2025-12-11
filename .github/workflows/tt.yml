@@ -1,0 +1,68 @@
+name: AdShare Login Session Manager
+
+on:
+  workflow_dispatch:
+    inputs:
+      username:
+        description: 'AdShare Username/Email'
+        required: true
+        type: string
+      password:
+        description: 'AdShare Password'
+        required: true
+        type: string
+        sensitive: true
+
+jobs:
+  generate-session:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+    
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.9'
+    
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install requests beautifulsoup4
+    
+    - name: Run AdShare login script
+      env:
+        ADS_USERNAME: ${{ inputs.username }}
+        ADS_PASSWORD: ${{ inputs.password }}
+      run: |
+        if [ ! -f "adshare_login.py" ]; then
+          echo "Error: adshare_login.py not found!"
+          exit 1
+        fi
+        
+        python -c "
+import os
+from adshare_login import get_session
+
+username = os.environ.get('ADS_USERNAME')
+password = os.environ.get('ADS_PASSWORD')
+
+if not username or not password:
+    print('Error: ADS_USERNAME and ADS_PASSWORD environment variables must be set!')
+    exit(1)
+
+session = get_session(username, password)
+if session:
+    print('✓ Login successful! Session cookies generated.')
+else:
+    print('✗ Login failed!')
+    exit(1)
+        "
+    
+    - name: Upload session cookies as artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: adshare-session-cookies
+        path: session_cookies.pkl
+        retention-days: 1  # Auto-delete after 1 day for security
