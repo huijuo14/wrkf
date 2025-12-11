@@ -1,4 +1,4 @@
-name: AdShare Login Session Manager
+name: Generate AdShare Session Cookies
 
 on:
   workflow_dispatch:
@@ -11,58 +11,52 @@ on:
         description: 'AdShare Password'
         required: true
         type: string
-        sensitive: true
 
 jobs:
-  generate-session:
+  login-and-save-cookies:
     runs-on: ubuntu-latest
     
     steps:
     - name: Checkout repository
       uses: actions/checkout@v4
     
-    - name: Set up Python
+    - name: Setup Python
       uses: actions/setup-python@v4
       with:
-        python-version: '3.9'
+        python-version: '3.10'
     
     - name: Install dependencies
       run: |
-        python -m pip install --upgrade pip
         pip install requests beautifulsoup4
     
-    - name: Run AdShare login script
+    - name: Run login script
       env:
-        ADS_USERNAME: ${{ inputs.username }}
-        ADS_PASSWORD: ${{ inputs.password }}
+        ADSHARE_USERNAME: ${{ inputs.username }}
+        ADSHARE_PASSWORD: ${{ inputs.password }}
       run: |
-        if [ ! -f "adshare_login.py" ]; then
-          echo "Error: adshare_login.py not found!"
-          exit 1
-        fi
-        
-        python -c "
-import os
-from adshare_login import get_session
-
-username = os.environ.get('ADS_USERNAME')
-password = os.environ.get('ADS_PASSWORD')
-
-if not username or not password:
-    print('Error: ADS_USERNAME and ADS_PASSWORD environment variables must be set!')
-    exit(1)
-
-session = get_session(username, password)
-if session:
-    print('✓ Login successful! Session cookies generated.')
-else:
-    print('✗ Login failed!')
-    exit(1)
-        "
+        echo "Running AdShare login script..."
+        python adshare_login.py "$ADSHARE_USERNAME" "$ADSHARE_PASSWORD"
     
-    - name: Upload session cookies as artifact
+    - name: Check for cookies file
+      id: check-cookies
+      run: |
+        if [ -f "session_cookies.pkl" ]; then
+          echo "Cookies file found!"
+          echo "exists=true" >> $GITHUB_OUTPUT
+        else
+          echo "ERROR: No cookies file generated!"
+          echo "exists=false" >> $GITHUB_OUTPUT
+        fi
+    
+    - name: Upload cookies artifact
+      if: steps.check-cookies.outputs.exists == 'true'
       uses: actions/upload-artifact@v4
       with:
-        name: adshare-session-cookies
+        name: adshare-cookies
         path: session_cookies.pkl
-        retention-days: 1  # Auto-delete after 1 day for security
+        retention-days: 1
+    
+    - name: Cleanup sensitive files
+      if: always()
+      run: |
+        rm -f session_cookies.pkl
