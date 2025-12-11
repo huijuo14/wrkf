@@ -2,6 +2,7 @@
 """
 AdShare Smart Bid Monitor with Campaign Status Checking
 Fixes the credit wasting issue by checking campaign status before bidding
+Now uses adshare_login module for session management
 """
 import os
 import re
@@ -10,6 +11,9 @@ import requests
 from bs4 import BeautifulSoup
 import pickle
 from datetime import datetime
+
+# Import the login module
+import adshare_login
 
 # Configuration
 BASE_URL = "https://adsha.re"
@@ -36,90 +40,6 @@ def save_cookies(jar):
         print(f"Cookies saved to {COOKIE_FILE}")
     except Exception as e:
         print(f"Error saving cookies: {e}")
-
-def get_login_form_details(session):
-    """Get dynamic login form details"""
-    try:
-        response = session.get(f'{BASE_URL}/login')
-        soup = BeautifulSoup(response.text, 'html.parser')
-        login_form = soup.find('form')
-
-        if not login_form:
-            print("Could not find login form")
-            return None, None, None
-
-        # Get the actual form action URL
-        form_action = login_form.get('action')
-        if form_action.startswith('/'):
-            login_url = BASE_URL + form_action
-        elif not form_action.startswith('http'):
-            login_url = BASE_URL + '/' + form_action
-        else:
-            login_url = form_action
-
-        # Find email and password fields
-        email_field = None
-        password_field = None
-
-        all_inputs = login_form.find_all('input')
-        for inp in all_inputs:
-            inp_type = inp.get('type', 'text')
-            inp_value = inp.get('value', '')
-            inp_name = inp.get('name', '')
-
-            # Look for email field
-            if inp_type == 'text' or inp_type == 'email':
-                inp_value_lower = inp_value.lower()
-                if 'email' in inp_value_lower or 'mail' in inp_value_lower or 'address' in inp_value_lower or 'email' in inp_name.lower():
-                    email_field = inp_name
-            # Look for password field (has 'Password' as the value)
-            elif inp_value == 'Password':
-                password_field = inp_name
-            # Special case: password field might have 'password' as type
-            elif inp_type == 'password':
-                password_field = inp_name
-
-        return login_url, email_field, password_field
-    except Exception as e:
-        print(f"Error getting login form details: {e}")
-        return None, None, None
-
-def login(session):
-    """Perform login with dynamic form fields"""
-    login_url, email_field, password_field = get_login_form_details(session)
-
-    if not login_url or not email_field or not password_field:
-        print("Failed to get login form details")
-        return False
-
-    # Prepare login data with correct field names
-    login_data = {
-        email_field: USERNAME,
-        password_field: PASSWORD,
-    }
-
-    print(f"Attempting login with fields: {email_field}, {password_field}")
-    
-    try:
-        response = session.post(login_url, data=login_data, timeout=15)
-        print(f"Login response status: {response.status_code}")
-        
-        # Check if login was successful by looking for account-related elements
-        if 'account' in response.text.lower() or 'logout' in response.text.lower() or response.url != f'{BASE_URL}/login':
-            print("Login successful!")
-            return True
-        else:
-            print("Login may have failed. Checking response...")
-            # Check if still on login page
-            if 'email address' in response.text.lower() and 'password' in response.text.lower():
-                print("Login failed - still on login page")
-                return False
-            else:
-                print("Login response doesn't show login page, assuming success")
-                return True
-    except Exception as e:
-        print(f"Error during login: {e}")
-        return False
 
 def get_campaign_status(session, campaign_id):
     """Get the status of a campaign (ACTIVE, COMPLETE, PAUSED, etc.)"""
@@ -357,41 +277,14 @@ def run_bid_monitor_once():
     """Main function to run one cycle of the bid monitor."""
     print(f"--- Starting Smart Bid Monitor Cycle at {datetime.now():%Y-%m-%d %H:%M:%S} ---")
 
-    # Create session
-    session = requests.Session()
+    # Use adshare_login module to get authenticated session
+    session = adshare_login.get_session(USERNAME, PASSWORD)
+    
+    if not session:
+        print("Failed to get authenticated session, exiting")
+        return
 
-    # Try to load existing cookies
-    loaded_cookies = load_cookies()
-    if loaded_cookies:
-        session.cookies = loaded_cookies
-        print("Loaded existing cookies")
-        
-        # Verify session is still valid
-        try:
-            verify_response = session.get(f"{BASE_URL}/adverts", timeout=10)
-            if 'login' in verify_response.text.lower() or verify_response.status_code == 403:
-                print("Session appears invalid, performing fresh login")
-                session = requests.Session()
-                if not login(session):
-                    print("Login failed, exiting")
-                    return
-                save_cookies(session.cookies)
-            else:
-                print("Session is valid")
-        except:
-            print("Could not verify session, performing fresh login")
-            session = requests.Session()
-            if not login(session):
-                print("Login failed, exiting")
-                return
-            save_cookies(session.cookies)
-    else:
-        print("No existing cookies, performing fresh login")
-        if not login(session):
-            print("Login failed, exiting")
-            return
-        save_cookies(session.cookies)
-
+    print("Session established successfully")
     print("Waiting 5 seconds for session to stabilize...")
     time.sleep(5)
 
@@ -405,7 +298,7 @@ def run_bid_monitor_once():
     for campaign in campaigns:
         print(f"\nChecking campaign {campaign['id']}")
 
-        # NEW: Check campaign status before doing anything
+        # Check campaign status before doing anything
         status = get_campaign_status(session, campaign['id'])
         print(f"  Campaign status: {status}")
 
@@ -425,7 +318,8 @@ def run_bid_monitor_once():
                 print(f"  Current bid is below desired ({desired_bid}), adjusting...")
                 if adjust_bid(session, campaign, desired_bid):
                     print(f"  Bid adjusted to {desired_bid}")
-                    save_cookies(session.cookies)
+                    # Save cookies after successful bid adjustment
+                    adshare_login.save_cookies(session.cookies)
                 else:
                     print("  Failed to adjust bid, continuing...")
             else:
