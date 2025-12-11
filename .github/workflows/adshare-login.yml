@@ -13,8 +13,11 @@ on:
         type: string
 
 jobs:
-  login-and-save-cookies:
+  generate-cookies:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      actions: write
     
     steps:
     - name: Checkout repository
@@ -31,32 +34,71 @@ jobs:
     
     - name: Run login script
       env:
-        ADSHARE_USERNAME: ${{ inputs.username }}
-        ADSHARE_PASSWORD: ${{ inputs.password }}
+        ADSHARE_USER: ${{ inputs.username }}
+        ADSHARE_PASS: ${{ inputs.password }}
       run: |
-        echo "Running AdShare login script..."
-        python adshare_login.py "$ADSHARE_USERNAME" "$ADSHARE_PASSWORD"
+        echo "Starting AdShare login..."
+        python adshare_login.py "$ADSHARE_USER" "$ADSHARE_PASS"
     
-    - name: Check for cookies file
-      id: check-cookies
+    - name: Display cookies content
+      if: success()
       run: |
-        if [ -f "session_cookies.pkl" ]; then
-          echo "Cookies file found!"
-          echo "exists=true" >> $GITHUB_OUTPUT
+        echo "=== Cookies File Content ==="
+        if [ -f "cookies.txt" ]; then
+          cat cookies.txt
+          echo "=============================="
         else
-          echo "ERROR: No cookies file generated!"
-          echo "exists=false" >> $GITHUB_OUTPUT
+          echo "ERROR: cookies.txt not generated!"
+          exit 1
         fi
     
     - name: Upload cookies artifact
-      if: steps.check-cookies.outputs.exists == 'true'
       uses: actions/upload-artifact@v4
       with:
-        name: adshare-cookies
-        path: session_cookies.pkl
+        name: adshare-cookies-netscape
+        path: cookies.txt
         retention-days: 1
+        if-no-files-found: error
+    
+    - name: Create cookie usage examples
+      if: success()
+      run: |
+        echo "=== Cookie Usage Examples ===" > USAGE.md
+        echo "" >> USAGE.md
+        echo "## Using with curl:" >> USAGE.md
+        echo '```bash' >> USAGE.md
+        echo "curl -b cookies.txt -c cookies.txt 'https://adsha.re/account'" >> USAGE.md
+        echo '```' >> USAGE.md
+        echo "" >> USAGE.md
+        echo "## Using with wget:" >> USAGE.md
+        echo '```bash' >> USAGE.md
+        echo "wget --load-cookies cookies.txt 'https://adsha.re/account'" >> USAGE.md
+        echo '```' >> USAGE.md
+        echo "" >> USAGE.md
+        echo "## Using with Python requests:" >> USAGE.md
+        echo '```python' >> USAGE.md
+        echo "import requests" >> USAGE.md
+        echo "from http.cookiejar import MozillaCookieJar" >> USAGE.md
+        echo "" >> USAGE.md
+        echo "# Load cookies" >> USAGE.md
+        echo "jar = MozillaCookieJar('cookies.txt')" >> USAGE.md
+        echo "jar.load(ignore_discard=True, ignore_expires=True)" >> USAGE.md
+        echo "" >> USAGE.md
+        echo "# Use in session" >> USAGE.md
+        echo "session = requests.Session()" >> USAGE.md
+        echo "session.cookies.update(jar)" >> USAGE.md
+        echo "response = session.get('https://adsha.re/account')" >> USAGE.md
+        echo '```' >> USAGE.md
+    
+    - name: Upload usage documentation
+      uses: actions/upload-artifact@v4
+      with:
+        name: cookie-usage-guide
+        path: USAGE.md
     
     - name: Cleanup sensitive files
       if: always()
       run: |
-        rm -f session_cookies.pkl
+        echo "Cleaning up sensitive files..."
+        rm -f cookies.txt USAGE.md
+        echo "Cleanup complete."
