@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 """
 AdShare Daily Visitor Assigner - Fixed URL Issues
-Now uses adshare_login module for session management
 """
 import os
 import re
@@ -11,9 +10,6 @@ import pickle
 from bs4 import BeautifulSoup
 from datetime import datetime
 import pytz
-
-# Import the login module
-import adshare_login
 
 # Configuration
 BASE_URL = "https://adsha.re"
@@ -41,15 +37,126 @@ def save_cookies(jar):
     except Exception as e:
         print(f"Error saving cookies: {e}")
 
-def get_session():
-    """Get authenticated session using the adshare_login module"""
-    session = adshare_login.get_session(USERNAME, PASSWORD)
+def get_login_form_details(session):
+    """Get dynamic login form details"""
+    try:
+        response = session.get(f'{BASE_URL}/login')
+        soup = BeautifulSoup(response.text, 'html.parser')
+        login_form = soup.find('form')
+
+        if not login_form:
+            print("Could not find login form")
+            return None, None, None
+
+        # Get the actual form action URL
+        form_action = login_form.get('action')
+        if form_action.startswith('/'):
+            login_url = BASE_URL + form_action
+        elif not form_action.startswith('http'):
+            login_url = BASE_URL + '/' + form_action
+        else:
+            login_url = form_action
+
+        # Find email and password fields
+        email_field = None
+        password_field = None
+
+        all_inputs = login_form.find_all('input')
+        for inp in all_inputs:
+            inp_type = inp.get('type', 'text')
+            inp_value = inp.get('value', '')
+            inp_name = inp.get('name', '')
+
+            # Look for email field
+            if inp_type == 'text' or inp_type == 'email':
+                inp_value_lower = inp_value.lower()
+                if 'email' in inp_value_lower or 'mail' in inp_value_lower or 'address' in inp_value_lower or 'email' in inp_name.lower():
+                    email_field = inp_name
+            # Look for password field (has 'Password' as the value)
+            elif inp_value == 'Password':
+                password_field = inp_name
+            # Special case: password field might have 'password' as type
+            elif inp_type == 'password':
+                password_field = inp_name
+
+        return login_url, email_field, password_field
+    except Exception as e:
+        print(f"Error getting login form details: {e}")
+        return None, None, None
+
+def login(session):
+    """Perform login with dynamic form fields"""
+    login_url, email_field, password_field = get_login_form_details(session)
+
+    if not login_url or not email_field or not password_field:
+        print("Failed to get login form details")
+        return False
+
+    # Prepare login data with correct field names
+    login_data = {
+        email_field: USERNAME,
+        password_field: PASSWORD,
+    }
+
+    print(f"Attempting login with fields: {email_field}, {password_field}")
     
-    if not session:
-        print("✗ Could not establish authenticated session using adshare_login module")
-        return None
+    try:
+        response = session.post(login_url, data=login_data, timeout=15)
+        print(f"Login response status: {response.status_code}")
         
-    print("✓ Authenticated session established successfully")
+        # Check if login was successful by looking for account-related elements
+        if 'account' in response.text.lower() or 'logout' in response.text.lower() or response.url != f'{BASE_URL}/login':
+            print("Login successful!")
+            return True
+        else:
+            print("Login may have failed. Checking response...")
+            # Check if still on login page
+            if 'email address' in response.text.lower() and 'password' in response.text.lower():
+                print("Login failed - still on login page")
+                return False
+            else:
+                print("Login response doesn't show login page, assuming success")
+                return True
+    except Exception as e:
+        print(f"Error during login: {e}")
+        return False
+
+def get_session():
+    """Get authenticated session using the working login approach"""
+    session = requests.Session()
+    
+    # Try to load existing cookies
+    loaded_cookies = load_cookies()
+    if loaded_cookies:
+        session.cookies = loaded_cookies
+        print("Loaded existing cookies")
+        
+        # Verify session is still valid
+        try:
+            verify_response = session.get(f"{BASE_URL}/adverts", timeout=10)
+            if 'login' in verify_response.text.lower() or verify_response.status_code == 403:
+                print("Session appears invalid, performing fresh login")
+                session = requests.Session()  # Create a new session
+                if not login(session):
+                    print("Login failed, exiting")
+                    return None
+                save_cookies(session.cookies)
+            else:
+                print("Session is valid")
+        except Exception as e:
+            print(f"Could not verify session: {e}, performing fresh login")
+            session = requests.Session()
+            if not login(session):
+                print("Login failed, exiting")
+                return None
+            save_cookies(session.cookies)
+    else:
+        print("No existing cookies, performing fresh login")
+        if not login(session):
+            print("Login failed, exiting")
+            return None
+        save_cookies(session.cookies)
+    
     return session
 
 def get_completed_campaigns(session):
@@ -166,8 +273,8 @@ def assign_visitors(session, assign_url, num_visitors=50):
         # Check if assignment was successful
         if "visitors" in submit_response.text.lower() or "assign" in submit_response.text.lower() or "update" in submit_response.text.lower():
             print(f"  ✓ Successfully assigned {num_visitors} visitors to campaign {campaign_id}")
-            # Save updated cookies using adshare_login module
-            adshare_login.save_cookies(session.cookies)
+            # Save updated cookies
+            save_cookies(session.cookies)
             return True
         else:
             print("  ✗ Assignment may have failed - check response")
@@ -187,7 +294,7 @@ def run_daily_assignment():
     print(f"--- Starting Daily Visitor Assignment at {current_time_ist:%Y-%m-%d %H:%M:%S} IST ---")
     print(f"Configuration: 50 visitors, 1 max campaign, status: COMPLETE")
 
-    # Get authenticated session using adshare_login module
+    # Get authenticated session
     session = get_session()
     if not session:
         print("✗ Could not establish authenticated session")
