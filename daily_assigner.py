@@ -13,7 +13,7 @@ import pytz
 
 # Configuration
 BASE_URL = "https://adsha.re"
-USERNAME = os.environ.get('ADSHARE_USERNAME', "jiocloud90@gmail.com")
+USERNAME = os.environ.get('ADSHARE_USERNAME', "loginallapps@gmail.com")
 PASSWORD = os.environ.get('ADSHARE_PASSWORD', "@Sd2007123")
 COOKIE_FILE = "session_cookies.pkl"
 
